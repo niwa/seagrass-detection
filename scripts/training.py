@@ -16,9 +16,8 @@ import matplotlib.pyplot
 
 
 def train_classifier(
-    data_path: pathlib.Path,
     training_sites: list,
-    training_path: pathlib.Path,
+    samples_path: pathlib.Path,
     uav_labels_file: pathlib.Path,
     uav_classes_to_ignore: dict,
     satellite_classes: dict,
@@ -31,7 +30,7 @@ def train_classifier(
     print(f"\tLoad in sites: {training_sites}")
     training_dataframe = []
     for training_site in training_sites:
-        training_file = training_path / f"{training_site}_training_data.csv"
+        training_file = samples_path / f"{training_site}_training_data.csv"
         training_dataframe.append(pandas.read_csv(training_file))
     training_dataframe = pandas.concat(training_dataframe, ignore_index=True)
 
@@ -154,7 +153,7 @@ def confusion_matrix_of_site(
         ~uav_training_data.isin(
             [uav_training_labels[key] for key in uav_classes_to_ignore]
         ),
-        UAV_NAN_CLASS,
+        utils.UAV_NAN_CLASS,
     )
 
     # convert UAV to satellite classifications
@@ -246,3 +245,34 @@ def confusion_matrix_of_site(
         ),
         dpi=300,
     )
+
+
+def plot_model_feature_importance(training_dataframe, model_file):
+    """Plot the feature importance of the trained random forest model."""
+    
+    model = joblib.load(model_file)
+    importance_df = pandas.DataFrame(
+        {'Feature': training_dataframe.drop(columns=["satellite_class_id", "uav_class_id", "time"]).columns,
+         'Importance': model.feature_importances_})
+    importance_df.sort_values(by='Importance', ascending=False).plot(kind='bar', x='Feature', y='Importance')
+    matplotlib.pyplot.savefig(model_file.with_name(f"{model_file.stem}_random_forest_feature_importance.png"), dpi=300)
+
+
+def plot_training_data_class_distribution(training_dataframe, model_file):
+    """Plot the class distribution of the training data."""
+    
+    # Plot satellite bands for UAV classes
+    number_uav_classes = len(training_dataframe["uav_class_id"].unique())
+    nrows = int(numpy.ceil(number_uav_classes/3))
+    figure, axes = matplotlib.pyplot.subplots(nrows=nrows, ncols=3, figsize=(21, 6*nrows))
+    for i, (class_id, ax) in enumerate(zip(training_dataframe["uav_class_id"].unique(), axes.flat)):
+        training_dataframe[training_dataframe["uav_class_id"] == 1].drop(columns=["SCL", "uav_class_id", "satellite_class_id"]).boxplot(ax=ax)  
+        ax.set_title(f"Spectral plot for class ID {class_id}")
+    matplotlib.pyplot.savefig(model_file.with_name(f"{model_file.stem}_training_uav_class_IDs.png"), dpi=300)
+
+    # Plot satellite bands for the satellite class used for prediction
+    figure, axes = matplotlib.pyplot.subplots(nrows=2, ncols=2, figsize=(14, 12))
+    for i, (class_id, ax) in enumerate(zip(training_dataframe["satellite_class_id"].unique(), axes.flat)):
+        training_dataframe[training_dataframe["satellite_class_id"] == 1].drop(columns=["SCL", "satellite_class_id", "uav_class_id"]).boxplot(ax=ax)  
+        ax.set_title(f"Spectral plot for class ID {class_id}")
+    matplotlib.pyplot.savefig(model_file.with_name(f"{model_file.stem}_training_satellite_class_IDs.png"), dpi=300)

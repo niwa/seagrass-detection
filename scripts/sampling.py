@@ -234,7 +234,7 @@ def sample_site(
         uav_polygon = geopandas.read_file(polygon_file)
     
     # get or load low tide satellite with no cloud
-    satellite_file = utils.get_satellite_training_path()
+    satellite_file = utils.get_satellite_training_path(site_name=site_name)
     if not satellite_file.exists():
         print("\tSave satellite image of the site around lowtide without cloud")
     
@@ -266,7 +266,7 @@ def sample_site(
     )
     if not training_file.exists():
         print("Construct training data from UAV and Satellite imagery")
-
+        training_file.parent.mkdir(exist_ok=True)
         if sample_method == "sampling_1":
             training_observations = training_data_from_images_method_1(
                 satellite_data=satellite_data,
@@ -302,10 +302,10 @@ def sample_site(
 
 def site_sample_counts_by_class(sample_method: str, method_2_threshold: float):
     """Summarise the number of samples for each class for each site and save to csv."""
-    sample_folder_path = utils.get_sample_folder_path(sample_method, method_2_threshold)
+    samples_folder_path = utils.get_samples_path(sample_method, method_2_threshold)
     counts_summary = []
     site_names = []
-    for site_summary_file in sample_folder_path.glob("*_training_data_summary.csv"):
+    for site_summary_file in samples_folder_path.glob("*_training_data_summary.csv"):
         site_names.append(site_summary_file.stem.replace("_training_data_summary", ""))
         counts_summary.append(pandas.read_csv(site_summary_file))
     # Into a summary across all sites

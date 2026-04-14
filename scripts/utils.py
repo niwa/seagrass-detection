@@ -15,10 +15,10 @@ UAV_NAN_CLASS = 0
 
 def get_data_path():
     """Get the path to the data folder."""
-    return pathlib.Path(__file__).resolve().parent / "data"
+    return pathlib.Path(__file__).resolve().parent.parent / "data"
 
 
-def get_sample_folder_path(sample_method: str, method_2_threshold: float):
+def get_samples_path(sample_method: str, method_2_threshold: float):
     """Get the path to the sample folder for a given sampling method."""
 
     if sample_method == "sampling_1":
@@ -33,7 +33,7 @@ def get_sample_folder_path(sample_method: str, method_2_threshold: float):
 def get_samples_summary_file_path(sample_method: str, method_2_threshold: float):
     """Get the path to the sample summary file for a given sampling method."""
 
-    sample_folder_path = get_sample_folder_path(sample_method, method_2_threshold)
+    sample_folder_path = get_samples_path(sample_method, method_2_threshold)
     return sample_folder_path / "samples_summary.csv"
 
 
@@ -51,7 +51,7 @@ def get_satellite_training_path(site_name: str):
 
 def get_training_data_path(site_name: str, sample_method: str, method_2_threshold: float):
     """Get the path to the training data file."""
-    sample_folder_path = get_sample_folder_path(sample_method, method_2_threshold)
+    sample_folder_path = get_samples_path(sample_method, method_2_threshold)
     return sample_folder_path / f"{site_name}_training_data.csv"
 
 
@@ -66,7 +66,8 @@ def get_model_path(model_name: str):
     data_path = get_data_path()
     return data_path / "models" / f"{model_name}.joblib"
 
-def create_data_folders(data_path: pathlib.Path):
+
+def create_data_folders():
     """Create output folders for satellite, training,
     validation and predictions. No error if they already exist."""
 
@@ -78,10 +79,8 @@ def create_data_folders(data_path: pathlib.Path):
                                                         parents=True)
     (data_path / "training" / "training_data").mkdir(exist_ok=True,
                                                      parents=True)
-    (data_path / "training" / "training_data").mkdir(exist_ok=True,
-                                                     parents=True)
 
-    (data_path / "models" / "satellite_images").mkdir(exist_ok=True,
+    (data_path / "models").mkdir(exist_ok=True,
                                                       parents=True)
 
     (data_path / "validation" / "predictions").mkdir(exist_ok=True,
