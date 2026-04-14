@@ -1,0 +1,23 @@
+name: seagrass
+channels:
+  - conda-forge
+dependencies:
+  - python==3.11
+  - pip
+  - pip:
+    - rioxarray
+    - pystac-client
+    - odc-stac
+    - geoapis
+    - python-dotenv
+    - netcdf4
+    - mapclassify # for geopandas.explore
+    - folium # for geopandas.explore
+    - matplotlib # for geopandas.explore
+    - ipykernel
+    - dask
+    - distributed
+    - planetary_computer
+    - plotly_express
+    - leafmap
+    - seaborn
