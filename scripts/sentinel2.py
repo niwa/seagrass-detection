@@ -216,7 +216,7 @@ def get_low_tide_no_cloud_images_near_date(
 
 
 def get_low_tide_no_cloud_images_in_year(
-    site_name, geometry, max_cloud_cover, year: int
+    geometry, max_cloud_cover, year: int
 ):
 
     data = get_low_tide_images_in_year(geometry, year)

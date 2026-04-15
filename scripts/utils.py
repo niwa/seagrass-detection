@@ -55,13 +55,7 @@ def get_training_data_path(site_name: str, sample_method: str, method_2_threshol
     return sample_folder_path / f"{site_name}_training_data.csv"
 
 
-def get_prediction_path(prediction_name: str):
-    """Get the path to the predicted data file."""
-    data_path = get_data_path()
-    return data_path / "validation" / "predictions" / prediction_name
-
-
-def get_model_path(model_name: str):
+def get_model_file(model_name: str):
     """Get the path to the model file."""
     data_path = get_data_path()
     return data_path / "models" / f"{model_name}.joblib"
