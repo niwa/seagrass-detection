@@ -36,7 +36,6 @@ Containing the files:
    * predictions - contains a `<TEST_SITE>_prediction_<MODEL_NAME>.nc`, `<TEST_SITE>_prediction_<MODEL_NAME>_confusion_matrix_time_all_dates.png` and `<TEST_SITE>_prediction_<MODEL_NAME>_confusion_matrix_time_<i>.png` for each satellite time for each model to test site validation.
 * predictons
    * satellite_images - contains a `<PREDICTION_SITE>_<YEAR>_sentinel-2.nc` of low-tide clould free sattelite images for each site and year combination that has been run.
-   * training_data  - a subfolder for each sampling methodology. Contains a `<SITE_NAME>_training_data.csv`, `<SITE_NAME>_training_data.gpkg` and `<SITE_NAME>_training_data_summary.csv` for each site and an overall `samples_summary.csv`.
    * predictions - contains a `<TEST_SITE>_<YEAR>_prediction_<MODEL_NAME>.nc` for each site and year run.
 
 # Environment setup

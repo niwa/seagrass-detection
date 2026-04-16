@@ -82,8 +82,6 @@ def create_data_folders():
 
     (data_path / "predictions" / "satellite_images").mkdir(exist_ok=True,
                                                            parents=True)
-    (data_path / "predictions" / "training_data").mkdir(exist_ok=True,
-                                                        parents=True)
     (data_path / "predictions" / "predictions").mkdir(exist_ok=True,
                                                       parents=True)
 
