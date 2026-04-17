@@ -131,6 +131,16 @@ def confusion_matrix_of_site(
     polygon_file,
 ):
 
+
+    # Exit if the plots have already been created.
+    overall_plot_filename = prediction_file.with_name(
+            f"{prediction_file.stem}_confusion_matrix_time_all_dates.png"
+        )
+    if overall_plot_filename.exists():
+        print(f"{overall_plot_filename.name} already exists."
+              "Skipping. Delete plots if you want them regenerated.")
+        return
+    
     uav_training_labels = (
         pandas.read_csv(uav_labels_file, sep="\t", header=None, names=["Value", "Key"])
         .set_index("Key")["Value"]
@@ -191,6 +201,15 @@ def confusion_matrix_of_site(
     all_predictions = []
     uav_training_data_reclassed.load()
     for time_index in range(len(sat_prediction_data["time"])):
+
+        plot_filename = prediction_file.with_name(
+            f"{prediction_file.stem}_confusion_matrix_time_{time_index}.png"
+        )
+
+        if plot_filename.exists():
+            print(f"{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
+            continue
+        
         print(f"\tConstruct confusion matrix for time index: {time_index}")
         truth = uav_training_data_reclassed.data[
             sat_prediction_data.isel(time=0).notnull()
@@ -214,12 +233,7 @@ def confusion_matrix_of_site(
             confusion_matrix=confusion_matrix, display_labels=satellite_classes.keys()
         )
         figure.plot(cmap=matplotlib.pyplot.cm.Blues)
-        matplotlib.pyplot.savefig(
-            prediction_file.with_name(
-                f"{prediction_file.stem}_confusion_matrix_time_{time_index}.png"
-            ),
-            dpi=300,
-        )
+        matplotlib.pyplot.savefig(plot_filename, dpi=300, )
         matplotlib.pyplot.close()
         all_truth.append(truth)
         all_predictions.append(predictions)
@@ -239,40 +253,50 @@ def confusion_matrix_of_site(
         confusion_matrix=confusion_matrix, display_labels=satellite_classes.keys()
     )
     figure.plot(cmap=matplotlib.pyplot.cm.Blues)
-    matplotlib.pyplot.savefig(
-        prediction_file.with_name(
-            f"{prediction_file.stem}_confusion_matrix_time_all_dates.png"
-        ),
-        dpi=300,
-    )
+    matplotlib.pyplot.savefig(overall_plot_filename, dpi=300, )
 
 
 def plot_model_feature_importance(training_dataframe, model_file):
     """Plot the feature importance of the trained random forest model."""
-    
-    model = joblib.load(model_file)
-    importance_df = pandas.DataFrame(
-        {'Feature': training_dataframe.drop(columns=["satellite_class_id", "uav_class_id", "time"]).columns,
-         'Importance': model.feature_importances_})
-    importance_df.sort_values(by='Importance', ascending=False).plot(kind='bar', x='Feature', y='Importance')
-    matplotlib.pyplot.savefig(model_file.with_name(f"{model_file.stem}_random_forest_feature_importance.png"), dpi=300)
+
+    plot_filename = model_file.with_name(f"{model_file.stem}_random_forest_feature_importance.png")
+    if plot_filename.exists():
+        print(f"{plot_filename.name} already exists. Delete if you've updated the "
+              "model and want to regenerate")
+    else:
+        model = joblib.load(model_file)
+        importance_df = pandas.DataFrame(
+            {'Feature': training_dataframe.drop(columns=["satellite_class_id", "uav_class_id", "time"]).columns,
+             'Importance': model.feature_importances_})
+        importance_df.sort_values(by='Importance', ascending=False).plot(kind='bar', x='Feature', y='Importance')
+        matplotlib.pyplot.savefig(model_file.with_name(f"{model_file.stem}_random_forest_feature_importance.png"), dpi=300)
 
 
 def plot_training_data_class_distribution(training_dataframe, model_file):
     """Plot the class distribution of the training data."""
     
     # Plot satellite bands for UAV classes
-    number_uav_classes = len(training_dataframe["uav_class_id"].unique())
-    nrows = int(numpy.ceil(number_uav_classes/3))
-    figure, axes = matplotlib.pyplot.subplots(nrows=nrows, ncols=3, figsize=(21, 6*nrows))
-    for i, (class_id, ax) in enumerate(zip(training_dataframe["uav_class_id"].unique(), axes.flat)):
-        training_dataframe[training_dataframe["uav_class_id"] == 1].drop(columns=["SCL", "uav_class_id", "satellite_class_id"]).boxplot(ax=ax)  
-        ax.set_title(f"Spectral plot for class ID {class_id}")
-    matplotlib.pyplot.savefig(model_file.with_name(f"{model_file.stem}_training_uav_class_IDs.png"), dpi=300)
+    plot_filename = model_file.with_name(f"{model_file.stem}_training_uav_class_IDs.png")
+    if plot_filename.exists():
+        print(f"{plot_filename.name} already exists. Delete if you've updated the model"
+              " and want to regenerate")
+    else:
+        number_uav_classes = len(training_dataframe["uav_class_id"].unique())
+        nrows = int(numpy.ceil(number_uav_classes/3))
+        figure, axes = matplotlib.pyplot.subplots(nrows=nrows, ncols=3, figsize=(21, 6*nrows))
+        for i, (class_id, ax) in enumerate(zip(training_dataframe["uav_class_id"].unique(), axes.flat)):
+            training_dataframe[training_dataframe["uav_class_id"] == 1].drop(columns=["SCL", "uav_class_id", "satellite_class_id"]).boxplot(ax=ax)  
+            ax.set_title(f"Spectral plot for class ID {class_id}")
+        matplotlib.pyplot.savefig(plot_filename, dpi=300)
 
     # Plot satellite bands for the satellite class used for prediction
-    figure, axes = matplotlib.pyplot.subplots(nrows=2, ncols=2, figsize=(14, 12))
-    for i, (class_id, ax) in enumerate(zip(training_dataframe["satellite_class_id"].unique(), axes.flat)):
-        training_dataframe[training_dataframe["satellite_class_id"] == 1].drop(columns=["SCL", "satellite_class_id", "uav_class_id"]).boxplot(ax=ax)  
-        ax.set_title(f"Spectral plot for class ID {class_id}")
-    matplotlib.pyplot.savefig(model_file.with_name(f"{model_file.stem}_training_satellite_class_IDs.png"), dpi=300)
+    plot_filename = model_file.with_name(f"{model_file.stem}_training_satellite_class_IDs.png")
+    if plot_filename.exists():
+        print(f"{plot_filename.name} already exists. Delete if you've updated the model"
+              " and want to regenerate")
+    else:
+        figure, axes = matplotlib.pyplot.subplots(nrows=2, ncols=2, figsize=(14, 12))
+        for i, (class_id, ax) in enumerate(zip(training_dataframe["satellite_class_id"].unique(), axes.flat)):
+            training_dataframe[training_dataframe["satellite_class_id"] == 1].drop(columns=["SCL", "satellite_class_id", "uav_class_id"]).boxplot(ax=ax)  
+            ax.set_title(f"Spectral plot for class ID {class_id}")
+        matplotlib.pyplot.savefig(plot_filename, dpi=300)

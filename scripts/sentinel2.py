@@ -17,7 +17,7 @@ CATALOGUE_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 COLLECTION = "sentinel-2-l2a"
 
 SATELLITE_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
-DATE_FORMAT_SITE_SURVEY = "%Y-%d-%m"
+DATE_FORMAT_SITE_SURVEY = "%m/%d/%Y"
 DATE_FORMAT_YYYYMMDD = "%Y-%m-%d"
 TIDE_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
