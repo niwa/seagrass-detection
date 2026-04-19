@@ -6,6 +6,7 @@ import shapely
 import rasterio
 import geopandas
 import xarray
+import rioxarray
 
 CRS_WSG = 4326
 CRS_NZTM = 2193
@@ -133,6 +134,29 @@ def save_netcdf(data: xarray.Dataset, filename):
             encoding[name]["grid_mapping"] = data.encoding["grid_mapping"]
     data.to_netcdf(filename, format="NETCDF4",
                    engine="netcdf4", encoding=encoding)
+
+
+def load_satellite(filename: pathlib):
+    """Load in a multiband satellite iamge."""
+    satellite_data = rioxarray.rioxarray.open_rasterio(
+            filename,
+            parse_coordinates=True,
+            masked=True
+        )
+    return satellite_data
+
+
+def load_classification(filename: pathlib, chunks: bool = True):
+    """Load in a multiband satellite iamge."""
+    classified_data = rioxarray.rioxarray.open_rasterio(
+            filename,
+            parse_coordinates=True,
+            masked=True,
+            chunks=chunks
+        )
+    if "band" in classified_data.coords:
+        classified_data = classified_data.squeeze("band", drop=True)
+    return classified_data
 
 
 def mask_to_polygons(mask_dataframe, coarsen_ratio: int = None):

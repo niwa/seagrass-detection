@@ -5,7 +5,6 @@ import sentinel2
 import gc
 import geopandas
 import xarray
-import rioxarray
 import pandas
 import scipy
 import sklearn.ensemble
@@ -76,9 +75,7 @@ def predict_site(
 ):
     """Predict classes for satellite image across all time steps."""
 
-    satellite_data = rioxarray.rioxarray.open_rasterio(
-        test_satellite_file, parse_coordinates=True, masked=True
-    )
+    satellite_data = utils.load_satellite(filename=test_satellite_file)
     uav_polygon = geopandas.read_file(polygon_file)
     model = joblib.load(model_file)
 
@@ -150,12 +147,8 @@ def confusion_matrix_of_site(
     print("\tLoad images and match resolution to UAV then compare predictions to UAV")
 
     # Load in images
-    uav_training_data = rioxarray.rioxarray.open_rasterio(
-        test_uav_file, parse_coordinates=True, masked=True, chunks=True
-    ).squeeze("band", drop=True)
-    sat_prediction_data = rioxarray.rioxarray.open_rasterio(
-        prediction_file, parse_coordinates=True, masked=True
-    )
+    uav_training_data = utils.load_classification(filename=test_uav_file, chunks=True)
+    sat_prediction_data = utils.load_satellite(filename=prediction_file)
     uav_polygon = geopandas.read_file(polygon_file)
 
     # drop classes to ignore

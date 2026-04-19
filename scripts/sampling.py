@@ -4,7 +4,6 @@
 import utils
 import sentinel2
 import pathlib
-import rioxarray
 import xarray
 import numpy
 import pandas
@@ -54,7 +53,10 @@ def extract_training_spectra_from_satellite_given_training_class(
     )
 
     if int(mask_coarse.sum()) == 0:
-        return pandas.DataFrame({key: [] for key in satellite.data_vars})
+        training_spectrum = pandas.DataFrame(
+                    columns=list(satellite_data.isel(time=0).data_vars) + ['x','y','uav_class_id']
+                )
+        return training_spectrum
 
     # 2. Remove unwanted SCL from class mask before sampling satellite.
     scl_mask = satellite["SCL"].isin(sentinel2.SCL_TO_IGNORE)
@@ -136,7 +138,7 @@ def training_data_from_images_method_2(satellite_data, uav_data, labels,
             if int(mask_coarse.sum()) == 0:
                 # Empty dataframe if no sites matchig the class
                 sampled_spectrum = pandas.DataFrame(
-                    {key: [] for key in satellite_data.isel(time=index).data_vars}
+                    columns=list(satellite_data.isel(time=0).data_vars) + ['x','y','uav_class_id']
                 )
             else:
                 # Contruct xy array from indices where mask is True
@@ -216,12 +218,10 @@ def sample_site(
         print("\tWARNING - no classified image")
         raise ValueError(f"Missing classified image for site {site_name}")
     else:
-        uav_data = rioxarray.rioxarray.open_rasterio(
-            uav_file,
-            parse_coordinates=True,
-            masked=True,
+        uav_data = utils.load_classification(
+            filename=uav_file,
             chunks=True
-        ).squeeze("band", drop=True)
+        )
         
     # create or load area polygon
     polygon_file = utils.get_site_polygon_path(site_name)
@@ -254,11 +254,7 @@ def sample_site(
             utils.write_netcdf_conventions_in_place(satellite_data)
             utils.save_netcdf(satellite_data, satellite_file)
     else:
-        satellite_data = rioxarray.rioxarray.open_rasterio(
-            satellite_file,
-            parse_coordinates=True,
-            masked=True
-        )
+        satellite_data = utils.load_satellite(filename=satellite_file)
 
     # Extract training dataset
     training_file = utils.get_training_data_path(
