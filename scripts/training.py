@@ -2,6 +2,7 @@
 
 import utils
 import sentinel2
+import sampling
 import gc
 import geopandas
 import xarray
@@ -144,7 +145,7 @@ def confusion_matrix_of_site(
         .to_dict()
     )
 
-    print("\tLoad images and match resolution to UAV then compare predictions to UAV")
+    print("\tMatch satellite resolution to UAV then compare predictions to UAV")
 
     # Load in images
     uav_training_data = utils.load_classification(filename=test_uav_file, chunks=True)
@@ -203,6 +204,147 @@ def confusion_matrix_of_site(
             print(f"{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
             continue
         
+        print(f"\tConstruct confusion matrix for time index: {time_index}")
+        truth = uav_training_data_reclassed.data[
+            sat_prediction_data.isel(time=0).notnull()
+        ]
+        predictions = sat_prediction_data.isel(time=time_index).data[
+            sat_prediction_data.isel(time=time_index).notnull()
+        ]
+        # drop any NaN interpolated from clipped areas in the prediction
+        mask = (
+            ~numpy.isnan(predictions)
+            & ~numpy.isnan(truth)
+            & (truth != utils.UAV_NAN_CLASS)
+        )
+        truth = truth[mask]
+        predictions = predictions[mask]
+
+        confusion_matrix = sklearn.metrics.confusion_matrix(
+            truth, predictions, normalize="true"
+        )
+        figure = sklearn.metrics.ConfusionMatrixDisplay(
+            confusion_matrix=confusion_matrix, display_labels=satellite_classes.keys()
+        )
+        figure.plot(cmap=matplotlib.pyplot.cm.Blues)
+        matplotlib.pyplot.savefig(plot_filename, dpi=300, )
+        matplotlib.pyplot.close()
+        all_truth.append(truth)
+        all_predictions.append(predictions)
+
+    # Force free memory
+    del uav_training_data_reclassed
+    del sat_prediction_data
+    gc.collect()
+
+    print("\tOverall confusion matrix across prediction dates")
+    all_truth = numpy.concatenate(all_truth)
+    all_predictions = numpy.concatenate(all_predictions)
+    confusion_matrix = sklearn.metrics.confusion_matrix(
+        all_truth, all_predictions, normalize="true"
+    )
+    figure = sklearn.metrics.ConfusionMatrixDisplay(
+        confusion_matrix=confusion_matrix, display_labels=satellite_classes.keys()
+    )
+    figure.plot(cmap=matplotlib.pyplot.cm.Blues)
+    matplotlib.pyplot.savefig(overall_plot_filename, dpi=300, )
+
+
+def confusion_matrix_of_site_satellite_resolution(
+    test_uav_file,
+    uav_labels_file,
+    prediction_file,
+    satellite_classes,
+    satellite_from_uav_classes,
+    uav_classes_to_ignore,
+    polygon_file,
+):
+
+
+    # Exit if the plots have already been created.
+    overall_plot_filename = prediction_file.with_name(
+            f"{prediction_file.stem}_confusion_matrix_{sentinel2.S2_RESOLUTION}_resolution_time_all_dates.png"
+        )
+    if overall_plot_filename.exists():
+        print(f"{overall_plot_filename.name} already exists."
+              "Skipping. Delete plots if you want them regenerated.")
+        return
+
+    uav_training_labels = (
+        pandas.read_csv(uav_labels_file, sep="\t", header=None, names=["Value", "Key"])
+        .set_index("Key")["Value"]
+        .to_dict()
+    )
+
+    print("Match UAV resolution to Satellite then compare predictions to UAV")
+
+    # Load in images
+    uav_training_data = utils.load_classification(filename=test_uav_file, chunks=True)
+    sat_prediction_data = utils.load_satellite(filename=prediction_file)
+    uav_polygon = geopandas.read_file(polygon_file)
+
+    # drop classes to ignore
+    uav_training_data_reclassed = uav_training_data.where(
+        ~uav_training_data.isin(
+            [uav_training_labels[key] for key in uav_classes_to_ignore]
+        ),
+        utils.UAV_NAN_CLASS,
+    )
+
+    # convert UAV to satellite classifications
+    for key in satellite_from_uav_classes.keys():
+        class_ids_to_map = [
+            uav_training_labels[key] for key in satellite_from_uav_classes[key]
+        ]
+        uav_training_data_reclassed = uav_training_data_reclassed.where(
+            ~uav_training_data.isin(class_ids_to_map), satellite_classes[key]
+        )
+
+    # Force free memory
+    del uav_training_data
+    gc.collect()
+
+    # Ensure nan for no data and clip both to polygon
+    uav_training_data_reclassed.rio.set_nodata(numpy.nan)
+    sat_prediction_data.rio.set_nodata(numpy.nan)
+
+    uav_training_data_reclassed = uav_training_data_reclassed.rio.clip(
+        uav_polygon.geometry, all_touched=True, drop=True
+    )
+    sat_prediction_data = sat_prediction_data.rio.clip(
+        uav_polygon.geometry, all_touched=True, drop=True
+    )
+
+    # Align UAV to satellite then coarsen taking the mode
+    def get_mode(array, axis):
+        """returns the mode values only; ignore counts"""
+        return scipy.stats.mode(array, axis=axis).mode
+    uav_training_data_reclassed.load()
+    uav_training_data_reclassed, upsample_rate = sampling.align_fine_grid_to_coarse_grid(
+        fine_grid=uav_training_data_reclassed, coarse_grid=sat_prediction_data)
+
+    uav_training_data_reclassed = uav_training_data_reclassed.coarsen(
+            x=upsample_rate, y=upsample_rate, boundary="trim"
+            ).reduce(get_mode)
+    # Ensure exactly even spacing of the satellite imagry in x & y
+    sat_prediction_data = sat_prediction_data.reindex_like(
+        uav_training_data_reclassed, method="nearest"
+    )
+
+    # Pull out the predictions vs ground truth
+    print("\tLoad UAV image")
+    all_truth = []
+    all_predictions = []
+    for time_index in range(len(sat_prediction_data["time"])):
+
+        plot_filename = prediction_file.with_name(
+            f"{prediction_file.stem}_confusion_matrix_{sentinel2.S2_RESOLUTION}_resolution_time_{time_index}.png"
+        )
+
+        if plot_filename.exists():
+            print(f"{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
+            continue
+
         print(f"\tConstruct confusion matrix for time index: {time_index}")
         truth = uav_training_data_reclassed.data[
             sat_prediction_data.isel(time=0).notnull()

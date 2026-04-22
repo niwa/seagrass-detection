@@ -84,31 +84,39 @@ def extract_training_spectra_from_satellite_given_training_class(
     return training_spectrum
 
 
+def align_fine_grid_to_coarse_grid(fine_grid, coarse_grid):
+    """Resample a fine grid so the pixel edges align with a coarse grid."""
+    upsample_rate = round(
+        coarse_grid.rio.resolution()[0] / fine_grid.rio.resolution()[0]
+    )
+    half_sat_res = coarse_grid.rio.resolution()[0] / 2
+    half_new_res = half_sat_res / upsample_rate
+    edge_offset = half_sat_res - half_new_res
+    resampled_y = numpy.linspace(
+        coarse_grid.y.data[0] + edge_offset,
+        coarse_grid.y.data[-1] - edge_offset,
+        (len(coarse_grid.y) - 0) * upsample_rate + 0,
+        endpoint=True,
+    )
+    resampled_x = numpy.linspace(
+        coarse_grid.x.data[0] - edge_offset,
+        coarse_grid.x.data[-1] + edge_offset,
+        (len(coarse_grid.x) - 0) * upsample_rate + 0,
+        endpoint=True,
+    )
+    fine_grid = fine_grid.reindex(x=resampled_x, y=resampled_y, method="nearest")
+
+    return fine_grid, upsample_rate
+
+
 def training_data_from_images_method_2(satellite_data, uav_data, labels,
                                        threshold):
     """Extract training data from the images across the labels and
     return a pandas DataFrame"""
 
     # 1. Align UAV to satellite data but at finer resolution
-    upsample_rate = round(
-        satellite_data.rio.resolution()[0] / uav_data.rio.resolution()[0]
-    )
-    half_sat_res = satellite_data.rio.resolution()[0] / 2
-    half_new_res = half_sat_res / upsample_rate
-    edge_offset = half_sat_res - half_new_res
-    resampled_y = numpy.linspace(
-        satellite_data.y.data[0] + edge_offset,
-        satellite_data.y.data[-1] - edge_offset,
-        (len(satellite_data.y) - 0) * upsample_rate + 0,
-        endpoint=True,
-    )
-    resampled_x = numpy.linspace(
-        satellite_data.x.data[0] - edge_offset,
-        satellite_data.x.data[-1] + edge_offset,
-        (len(satellite_data.x) - 0) * upsample_rate + 0,
-        endpoint=True,
-    )
-    uav_data = uav_data.reindex(x=resampled_x, y=resampled_y, method="nearest")
+    uav_data, upsample_rate = align_fine_grid_to_coarse_grid(
+        fine_grid=uav_data, coarse_grid=satellite_data)
 
     # 3. Ensure exactly the same values for the satellite coordinates
     # - as observed e-10 differences in coordinate value spacing
@@ -308,5 +316,5 @@ def site_sample_counts_by_class(sample_method: str, method_2_threshold: float):
     counts_summary = pandas.concat(counts_summary, keys=site_names).reset_index(
         level=0, names="Site")[["Site","uav_class_name", "count"]].pivot(index="Site", columns="uav_class_name",values="count")
     counts_summary = counts_summary.fillna(0)
-    counts_summary.to_csv(utils.get_samples_summary_file_path(sample_method, method_2_threshold), index=False)
+    counts_summary.to_csv(utils.get_samples_summary_file_path(sample_method, method_2_threshold))
     return counts_summary
