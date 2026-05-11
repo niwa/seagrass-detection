@@ -236,11 +236,11 @@ def sample_site(
     if not polygon_file.exists():
         print("\tsave polygon of the site")
         coarsen_ratio = max(numpy.ceil(sentinel2.S2_RESOLUTION / abs(numpy.array(uav_data.rio.resolution()))).astype(int))
-        uav_polygon = utils.mask_to_polygons(uav_data != utils.UAV_NAN_CLASS, coarsen_ratio=coarsen_ratio)
+        uav_polygon = utils.mask_to_polygons(uav_data.notnull(), coarsen_ratio=coarsen_ratio)
         uav_polygon.to_file(polygon_file)
     else:
         uav_polygon = geopandas.read_file(polygon_file)
-    
+
     # get or load low tide satellite with no cloud
     satellite_file = utils.get_satellite_training_path(site_name=site_name)
     if not satellite_file.exists():

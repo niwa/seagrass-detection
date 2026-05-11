@@ -11,15 +11,14 @@ import rioxarray
 CRS_WSG = 4326
 CRS_NZTM = 2193
 
-UAV_NAN_CLASS = 0
-
+UAV_NAN_CLASS = -128
 
 def get_data_path():
     """Get the path to the data folder."""
     return pathlib.Path(__file__).resolve().parent.parent / "data"
 
 
-def get_samples_path(sample_method: str, method_2_threshold: float):
+def get_samples_folder(sample_method: str, method_2_threshold: float):
     """Get the path to the sample folder for a given sampling method."""
 
     if sample_method == "sampling_1":
@@ -27,8 +26,28 @@ def get_samples_path(sample_method: str, method_2_threshold: float):
     elif sample_method == "sampling_2":
         sample_folder = f"{sample_method}_{int(100*method_2_threshold)}_percent"
 
+    return sample_folder
+
+def get_samples_path(sample_method: str, method_2_threshold: float):
+    """Get the path to the sample folder for a given sampling method."""
+
+    sample_folder = get_samples_folder(sample_method, method_2_threshold)
+
     data_path = get_data_path()
-    return data_path / "training" / "training_data" / sample_folder
+    samples_path = data_path / "training" / "training_data" / sample_folder
+    samples_path.mkdir(exist_ok=True)
+    return samples_path
+
+
+def get_spectral_plots_path(sample_method: str, method_2_threshold: float):
+    """Get the path to the sample folder for a given sampling method."""
+
+    sample_folder = get_samples_folder(sample_method, method_2_threshold)
+
+    data_path = get_data_path()
+    spectral_plots_path = data_path / "training" / "spectral_plots" / sample_folder
+    spectral_plots_path.mkdir(exist_ok=True)
+    return spectral_plots_path
 
 
 def get_samples_summary_file_path(sample_method: str, method_2_threshold: float):
@@ -56,6 +75,17 @@ def get_training_data_path(site_name: str, sample_method: str, method_2_threshol
     return sample_folder_path / f"{site_name}_training_data.csv"
 
 
+def get_models_path(sample_method: str, method_2_threshold: float):
+    """Get the path to the sample folder for a given sampling method."""
+
+    sample_folder = get_samples_folder(sample_method, method_2_threshold)
+
+    data_path = get_data_path()
+    models_path = data_path / "models" / sample_folder
+    models_path.mkdir(exist_ok=True)
+    return models_path
+
+
 def get_model_file(model_name: str):
     """Get the path to the model file."""
     data_path = get_data_path()
@@ -73,6 +103,9 @@ def create_data_folders():
     (data_path / "training" / "satellite_images").mkdir(exist_ok=True,
                                                         parents=True)
     (data_path / "training" / "training_data").mkdir(exist_ok=True,
+                                                     parents=True)
+
+    (data_path / "training" / "spectral_plots").mkdir(exist_ok=True,
                                                      parents=True)
 
     (data_path / "models").mkdir(exist_ok=True,
@@ -153,13 +186,13 @@ def load_satellite(filename: pathlib):
     return satellite_data
 
 
-def load_classification(filename: pathlib, chunks: bool = True):
-    """Load in a multiband satellite iamge."""
+def load_classification(filename: pathlib, chunks: bool = True, masked: bool = True):
+    """Load in a multiband satellite image."""
     classified_data = rioxarray.rioxarray.open_rasterio(
             filename,
             parse_coordinates=True,
-            masked=True,
-            chunks=chunks
+            masked=masked,
+            chunks=chunks, dtype="int8"
         )
     if "band" in classified_data.coords:
         classified_data = classified_data.squeeze("band", drop=True)
@@ -174,7 +207,7 @@ def mask_to_polygons(mask_dataframe, coarsen_ratio: int = None):
     """
     if coarsen_ratio is not None:
         mask_dataframe = mask_dataframe.coarsen(
-            x=coarsen_ratio, y=coarsen_ratio, boundary="trim"
+            x=coarsen_ratio, y=coarsen_ratio, boundary="pad"
         ).max(skipna=True)
         mask_dataframe.rio.write_transform(
             mask_dataframe.rio.transform(recalc=True), inplace=True
