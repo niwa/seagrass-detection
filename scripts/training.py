@@ -40,10 +40,11 @@ def train_classifier(
     training_observations = numpy.array(
         training_dataframe.drop(columns=["satellite_class_id", "uav_class_id", "time"])
     )
+    model_columns = pandas.DataFrame(columns=training_dataframe.drop(columns=["satellite_class_id", "uav_class_id", "time"]).columns)
     classifier = sklearn.ensemble.RandomForestClassifier()
     model = classifier.fit(training_observations, training_classes)
 
-    return model, training_dataframe
+    return model, training_dataframe, model_columns
 
 
 def load_samples(
@@ -106,19 +107,21 @@ def predict_site(
     test_satellite_file: pathlib.Path,
     polygon_file: pathlib.Path,
     model_file: pathlib.Path,
+    model_feature_names_file: pathlib.Path
 ):
-    """Predict classes for satellite image across all time steps."""
+    """Predict classes for satellite image across all time steps. Load feature names to ensure the same order"""
 
     satellite_data = utils.load_satellite(filename=test_satellite_file)
     uav_polygon = geopandas.read_file(polygon_file)
     model = joblib.load(model_file)
+    model_columns = pandas.read_csv(model_feature_names_file)
 
     predictions = []
     print(f"\tPredict for {len(satellite_data['time'])} satellite images")
     for time_index in range(len(satellite_data["time"])):
         # Predictions
         observations_to_predict = (
-            satellite_data.isel(time=time_index)
+            satellite_data.isel(time=time_index)[model_columns.columns]
             .to_array()
             .stack(dims=["y", "x"])
             .transpose()

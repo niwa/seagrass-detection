@@ -146,7 +146,7 @@ def training_data_from_images_method_2(satellite_data, uav_data, labels,
             if int(mask_coarse.sum()) == 0:
                 # Empty dataframe if no sites matchig the class
                 sampled_spectrum = pandas.DataFrame(
-                    columns=list(satellite_data.isel(time=0).data_vars) + ['x','y','uav_class_id']
+                    columns=list(satellite_data.isel(time=index).data_vars) + ['x','y','uav_class_id']
                 )
             else:
                 # Contruct xy array from indices where mask is True

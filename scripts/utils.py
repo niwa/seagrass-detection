@@ -86,10 +86,15 @@ def get_models_path(sample_method: str, method_2_threshold: float):
     return models_path
 
 
-def get_model_file(model_name: str):
-    """Get the path to the model file."""
+def get_validation_path(sample_method: str, method_2_threshold: float):
+    """Get the path to the sample folder for a given sampling method."""
+
+    sample_folder = get_samples_folder(sample_method, method_2_threshold)
+
     data_path = get_data_path()
-    return data_path / "models" / f"{model_name}.joblib"
+    models_path = data_path / "validation" / "predictions" / sample_folder
+    models_path.mkdir(exist_ok=True)
+    return models_path
 
 
 def create_data_folders():
