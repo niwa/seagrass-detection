@@ -261,7 +261,7 @@ def confusion_matrix_of_site(
                                   predictions=predictions,
                                   class_names=satellite_classes,
                                   plot_filename=plot_filename,
-                                  title= f"{int(method_2_threshold*100)}% Sampling Purity"; Time index {time_index}",
+                                  title= f"{int(method_2_threshold*100)}% Sampling Purity; Time index {time_index}",
             )
             matplotlib.pyplot.close()
 
