@@ -166,6 +166,8 @@ def confusion_matrix_of_site(
     method_2_threshold,
 ):
 
+    debug=False
+
     # Exit if the plots have already been created.
     overall_plot_filename = prediction_file.with_name(
             f"{prediction_file.stem}_confusion_matrix_time_all_dates.png"
@@ -250,23 +252,23 @@ def confusion_matrix_of_site(
         all_truth.append(truth)
         all_predictions.append(predictions)
 
-        if plot_filename.exists():
-            print(f"{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
-            continue
-        print(f"\tConstruct confusion matrix for time index")
-        plot_confusion_matrix(truth=truth,
-                              predictions=predictions,
-                              class_names=satellite_classes,
-                              plot_filename=plot_filename,
-                              title= f"{method_2_threshold*100}% Sampling Purity"#; Time index {time_index}",
-        )
-        matplotlib.pyplot.close()
+        if debug:
+            if plot_filename.exists():
+                print(f"{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
+                continue
+            print(f"\tConstruct confusion matrix for time index")
+            plot_confusion_matrix(truth=truth,
+                                  predictions=predictions,
+                                  class_names=satellite_classes,
+                                  plot_filename=plot_filename,
+                                  title= f"{int(method_2_threshold*100)}% Sampling Purity"; Time index {time_index}",
+            )
+            matplotlib.pyplot.close()
 
     # Force free memory
     del uav_training_data_reclassed
     del sat_prediction_data
     gc.collect()
-
     print("Overall confusion matrix across prediction dates")
     all_truth = numpy.concatenate(all_truth)
     all_predictions = numpy.concatenate(all_predictions)
@@ -274,7 +276,7 @@ def confusion_matrix_of_site(
                           predictions=all_predictions,
                           class_names=satellite_classes,
                           plot_filename=overall_plot_filename,
-                          title= f"{method_2_threshold*100}% Sampling Purity",
+                          title= f"{int(method_2_threshold*100)}% Sampling Purity",
     )
 
     return all_truth, all_predictions
@@ -410,7 +412,7 @@ def confusion_matrix_of_site_satellite_resolution(
     polygon_file,
 ):
 
-
+    debug=False
     # Exit if the plots have already been created.
     overall_plot_filename = prediction_file.with_name(
             f"{prediction_file.stem}_confusion_matrix_{sentinel2.S2_RESOLUTION}_resolution_time_all_dates.png"
@@ -507,14 +509,16 @@ def confusion_matrix_of_site_satellite_resolution(
         all_truth.append(truth)
         all_predictions.append(predictions)
 
-        if plot_filename.exists():
-            print(f"{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
-            continue
-        plot_confusion_matrix(truth=truth,
-                              predictions=predictions,
-                              class_names=satellite_classes,
-                              plot_filename=plot_filename,
-                              title=f"{method_2_threshold*100}% Sampling Purity"#; Time index 
+        if debug:
+            if plot_filename.exists():
+                print(f"{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
+                continue
+            plot_confusion_matrix(truth=truth,
+                                  predictions=predictions,
+                                  class_names=satellite_classes,
+                                  plot_filename=plot_filename,
+                                  title=f"{int(method_2_threshold*100)}% Sampling Purity; Time index",
+                                  )
 
     # Force free memory
     del uav_training_data_reclassed
@@ -528,7 +532,7 @@ def confusion_matrix_of_site_satellite_resolution(
                           predictions=all_predictions,
                           class_names=satellite_classes,
                           plot_filename=overall_plot_filename,
-                          title= f"{method_2_threshold*100}% Sampling Purity",
+                          title= f"{int(method_2_threshold*100)}% Sampling Purity",
     )
 
     return all_truth, all_predictions
