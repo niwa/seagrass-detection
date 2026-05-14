@@ -7,6 +7,7 @@ import rasterio
 import geopandas
 import xarray
 import rioxarray
+import pandas
 
 CRS_WSG = 4326
 CRS_NZTM = 2193
@@ -139,6 +140,15 @@ def write_netcdf_conventions_in_place(data):
             )"""
     data.rio.write_crs(data.rio.crs, inplace=True)
     return data
+
+def read_uav_classe_labels_file(uav_class_labels_file: pathlib.Path):
+    """Read in the UAV class lables file"""
+    uav_class_labels = (
+        pandas.read_csv(uav_class_labels_file, sep="\t", header=None, names=["Value", "Key"])
+        .set_index("Key")["Value"]
+        .to_dict()
+    )
+    return uav_class_labels
 
 
 def save_tiff(data: xarray.Dataset, filename):

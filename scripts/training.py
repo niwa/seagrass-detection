@@ -163,8 +163,8 @@ def confusion_matrix_of_site(
     satellite_from_uav_classes,
     uav_classes_to_ignore,
     polygon_file,
+    method_2_threshold,
 ):
-
 
     # Exit if the plots have already been created.
     overall_plot_filename = prediction_file.with_name(
@@ -254,15 +254,12 @@ def confusion_matrix_of_site(
             print(f"{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
             continue
         print(f"\tConstruct confusion matrix for time index")
-        confusion_matrix = sklearn.metrics.confusion_matrix(
-            truth, predictions, normalize="true"
+        plot_confusion_matrix(truth=truth,
+                              predictions=predictions,
+                              class_names=satellite_classes,
+                              plot_filename=plot_filename,
+                              title= f"{method_2_threshold*100}% Sampling Purity"#; Time index {time_index}",
         )
-        figure = sklearn.metrics.ConfusionMatrixDisplay(
-            confusion_matrix=confusion_matrix, display_labels=satellite_classes.keys()
-        )
-
-        figure.plot(cmap=matplotlib.pyplot.cm.Blues)
-        matplotlib.pyplot.savefig(plot_filename, dpi=300, )
         matplotlib.pyplot.close()
 
     # Force free memory
@@ -273,14 +270,12 @@ def confusion_matrix_of_site(
     print("Overall confusion matrix across prediction dates")
     all_truth = numpy.concatenate(all_truth)
     all_predictions = numpy.concatenate(all_predictions)
-    confusion_matrix = sklearn.metrics.confusion_matrix(
-        all_truth, all_predictions, normalize="true"
+    plot_confusion_matrix(truth=all_truth,
+                          predictions=all_predictions,
+                          class_names=satellite_classes,
+                          plot_filename=overall_plot_filename,
+                          title= f"{method_2_threshold*100}% Sampling Purity",
     )
-    figure = sklearn.metrics.ConfusionMatrixDisplay(
-        confusion_matrix=confusion_matrix, display_labels=satellite_classes.keys()
-    )
-    figure.plot(cmap=matplotlib.pyplot.cm.Blues)
-    matplotlib.pyplot.savefig(overall_plot_filename, dpi=300, )
 
     return all_truth, all_predictions
 
@@ -375,6 +370,34 @@ def plot_training_data_class_distribution(training_dataframe, model_file, uav_la
                                  satellite_labels=satellite_labels)
 
 
+def plot_confusion_matrix(
+    truth,
+    predictions,
+    class_names: dict,
+    plot_filename: pathlib.Path,
+    title: str
+):
+    """ Create a confusion matrix with the class names """
+    label_values = numpy.unique(numpy.concat([numpy.unique(truth), numpy.unique(predictions)]))
+    label_names = [key for key, value in class_names.items() if value in label_values]
+
+    confusion_matrix = sklearn.metrics.confusion_matrix(
+        truth, predictions, normalize="true"
+    )
+    display = sklearn.metrics.ConfusionMatrixDisplay(
+        confusion_matrix=confusion_matrix, display_labels=label_names
+    )
+
+    _, ax = matplotlib.pyplot.subplots(figsize=(10, 10))
+    display.plot(
+        ax=ax,
+        cmap=matplotlib.pyplot.cm.Blues,
+        values_format='.1%'
+    )
+    matplotlib.pyplot.xticks(rotation=90)
+    matplotlib.pyplot.tight_layout()
+    matplotlib.pyplot.title(title)
+    matplotlib.pyplot.savefig(plot_filename, dpi=300, )
 
 # Not implemented yet
 def confusion_matrix_of_site_satellite_resolution(
@@ -439,17 +462,17 @@ def confusion_matrix_of_site_satellite_resolution(
         uav_polygon.geometry, all_touched=True, drop=True
     )
 
-    # Align UAV to satellite then coarsen taking the mode
-    def get_mode(array, axis):
-        """returns the mode values only; ignore counts"""
-        return scipy.stats.mode(array, axis=axis).mode
-    uav_training_data_reclassed.load()
+    #uav_training_data_reclassed.load()
     uav_training_data_reclassed, upsample_rate = sampling.align_fine_grid_to_coarse_grid(
         fine_grid=uav_training_data_reclassed, coarse_grid=sat_prediction_data)
 
+        # Align UAV to satellite then coarsen taking the mode
+    def get_mode(array, axis):
+        """returns the mode values only; ignore counts"""
+        return scipy.stats.mode(array, axis=axis).mode
     uav_training_data_reclassed = uav_training_data_reclassed.coarsen(
             x=upsample_rate, y=upsample_rate, boundary="trim"
-            ).reduce(get_mode)
+            ).reduce(scipy.stats.mode)
     # Ensure exactly even spacing of the satellite imagry in x & y
     sat_prediction_data = sat_prediction_data.reindex_like(
         uav_training_data_reclassed, method="nearest"
@@ -487,15 +510,11 @@ def confusion_matrix_of_site_satellite_resolution(
         if plot_filename.exists():
             print(f"{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
             continue
-        confusion_matrix = sklearn.metrics.confusion_matrix(
-            truth, predictions, normalize="true"
-        )
-        figure = sklearn.metrics.ConfusionMatrixDisplay(
-            confusion_matrix=confusion_matrix, display_labels=satellite_classes.keys()
-        )
-        figure.plot(cmap=matplotlib.pyplot.cm.Blues)
-        matplotlib.pyplot.savefig(plot_filename, dpi=300, )
-        matplotlib.pyplot.close()
+        plot_confusion_matrix(truth=truth,
+                              predictions=predictions,
+                              class_names=satellite_classes,
+                              plot_filename=plot_filename,
+                              title=f"{method_2_threshold*100}% Sampling Purity"#; Time index 
 
     # Force free memory
     del uav_training_data_reclassed
@@ -505,11 +524,11 @@ def confusion_matrix_of_site_satellite_resolution(
     print("\tOverall confusion matrix across prediction dates")
     all_truth = numpy.concatenate(all_truth)
     all_predictions = numpy.concatenate(all_predictions)
-    confusion_matrix = sklearn.metrics.confusion_matrix(
-        all_truth, all_predictions, normalize="true"
+    plot_confusion_matrix(truth=all_truth,
+                          predictions=all_predictions,
+                          class_names=satellite_classes,
+                          plot_filename=overall_plot_filename,
+                          title= f"{method_2_threshold*100}% Sampling Purity",
     )
-    figure = sklearn.metrics.ConfusionMatrixDisplay(
-        confusion_matrix=confusion_matrix, display_labels=satellite_classes.keys()
-    )
-    figure.plot(cmap=matplotlib.pyplot.cm.Blues)
-    matplotlib.pyplot.savefig(overall_plot_filename, dpi=300, )
+
+    return all_truth, all_predictions
