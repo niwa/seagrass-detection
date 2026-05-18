@@ -419,7 +419,7 @@ def confusion_matrix_of_site_satellite_resolution(
     polygon_file,
     method_2_threshold,
 ):
-    '''Confusion matrix but coarsening the UAV imagry to the resolution of the satellite image and taking the mode"""
+    '''Confusion matrix but coarsening the UAV imagry to the resolution of the satellite image and taking the mode'''
     debug=False
     # Exit if the plots have already been created.
     overall_plot_filename = prediction_file.with_name(
