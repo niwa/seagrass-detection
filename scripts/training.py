@@ -131,7 +131,7 @@ def predict_site(
         # probabilities = model.predict_proba(observations_to_predict)
         predictions_i = predictions_i.reshape(
             len(satellite_data.y), len(satellite_data.x)
-        )
+        ).astype(utils.CLASSIFICATION_DTYPE)
 
         predictions_i = xarray.DataArray(
             [predictions_i],
@@ -186,8 +186,12 @@ def confusion_matrix_of_site(
     print("Match satellite resolution to UAV then compare predictions to UAV")
 
     # Load in images
-    uav_training_data = utils.load_classification(filename=test_uav_file, chunks=True, masked=False)
-    sat_prediction_data = utils.load_satellite(filename=prediction_file)
+    # UAV classification is int8 (~1.1 GB) so load without dask chunks: all
+    # subsequent .where() and rio.clip() operations then run eagerly in the
+    # main process rather than building a lazy graph that dask workers must
+    # compute simultaneously (which can multiply peak memory 4–8x).
+    uav_training_data = utils.load_classification(filename=test_uav_file, chunks=None, masked=False)
+    sat_prediction_data = utils.load_classification(filename=prediction_file, chunks=True, masked=False)
     uav_polygon = geopandas.read_file(polygon_file)
 
     # drop classes to ignore
@@ -233,14 +237,17 @@ def confusion_matrix_of_site(
             f"{prediction_file.stem}_confusion_matrix_time_{time_index}.png"
         )
 
-        print(f"Time index: {time_index}")
-        print(f"\tExtract truth and predictions")
-        truth = uav_training_data_reclassed.values[
-            sat_prediction_data.isel(time=time_index).notnull()
-        ]
-        predictions = sat_prediction_data.isel(time=time_index).values[
-            sat_prediction_data.isel(time=time_index).notnull()
-        ]
+        print(f"\tExtract truth and predictions time index: {time_index}")
+        # Compute mask to a numpy array before using it so it is not
+        # recomputed twice (once for truth, once for predictions) and so
+        # that it does not trigger a concurrent dask computation alongside
+        # uav_training_data_reclassed.values.
+        mask = sat_prediction_data.isel(time=time_index).notnull().values
+        truth = uav_training_data_reclassed.values[mask]
+        predictions = sat_prediction_data.isel(time=time_index).values[mask]
+        del mask
+        gc.collect()
+
         # drop any NaN interpolated from clipped areas in the prediction
         mask = (
             ~numpy.isnan(predictions)
@@ -254,9 +261,9 @@ def confusion_matrix_of_site(
 
         if debug:
             if plot_filename.exists():
-                print(f"{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
+                print(f"\t\t{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
                 continue
-            print(f"\tConstruct confusion matrix for time index")
+            print(f"\t\tConstruct confusion matrix")
             plot_confusion_matrix(truth=truth,
                                   predictions=predictions,
                                   class_names=satellite_classes,
@@ -401,7 +408,7 @@ def plot_confusion_matrix(
     matplotlib.pyplot.title(title)
     matplotlib.pyplot.savefig(plot_filename, dpi=300, )
 
-# Not implemented yet
+
 def confusion_matrix_of_site_satellite_resolution(
     test_uav_file,
     uav_labels_file,
@@ -410,8 +417,9 @@ def confusion_matrix_of_site_satellite_resolution(
     satellite_from_uav_classes,
     uav_classes_to_ignore,
     polygon_file,
+    method_2_threshold,
 ):
-
+    '''Confusion matrix but coarsening the UAV imagry to the resolution of the satellite image and taking the mode"""
     debug=False
     # Exit if the plots have already been created.
     overall_plot_filename = prediction_file.with_name(
@@ -431,8 +439,12 @@ def confusion_matrix_of_site_satellite_resolution(
     print("Match UAV resolution to Satellite then compare predictions to UAV")
 
     # Load in images
-    uav_training_data = utils.load_classification(filename=test_uav_file, chunks=True)
-    sat_prediction_data = utils.load_satellite(filename=prediction_file)
+    # UAV classification is int8 (~1.1 GB) so load without dask chunks: all
+    # subsequent .where() and rio.clip() operations then run eagerly in the
+    # main process rather than building a lazy graph that dask workers must
+    # compute simultaneously (which can multiply peak memory 4–8x).
+    uav_training_data = utils.load_classification(filename=test_uav_file, chunks=None, masked=False)
+    sat_prediction_data = utils.load_classification(filename=prediction_file, chunks=True, masked=False)
     uav_polygon = geopandas.read_file(polygon_file)
 
     # drop classes to ignore
@@ -474,7 +486,7 @@ def confusion_matrix_of_site_satellite_resolution(
         return scipy.stats.mode(array, axis=axis).mode
     uav_training_data_reclassed = uav_training_data_reclassed.coarsen(
             x=upsample_rate, y=upsample_rate, boundary="trim"
-            ).reduce(scipy.stats.mode)
+            ).reduce(get_mode)
     # Ensure exactly even spacing of the satellite imagry in x & y
     sat_prediction_data = sat_prediction_data.reindex_like(
         uav_training_data_reclassed, method="nearest"
@@ -491,12 +503,16 @@ def confusion_matrix_of_site_satellite_resolution(
         )
 
         print(f"\tConstruct confusion matrix for time index: {time_index}")
-        truth = uav_training_data_reclassed.values[
-            sat_prediction_data.isel(time=time_index).notnull()
-        ]
-        predictions = sat_prediction_data.isel(time=time_index).values[
-            sat_prediction_data.isel(time=time_index).notnull()
-        ]
+        # Compute mask to a numpy array before using it so it is not
+        # recomputed twice (once for truth, once for predictions) and so
+        # that it does not trigger a concurrent dask computation alongside
+        # uav_training_data_reclassed.values.
+        mask = sat_prediction_data.isel(time=time_index).notnull().values
+        truth = uav_training_data_reclassed.values[mask]
+        predictions = sat_prediction_data.isel(time=time_index).values[mask]
+        del mask
+        gc.collect()
+
         # drop any NaN interpolated from clipped areas in the prediction
         mask = (
             ~numpy.isnan(predictions)
@@ -517,7 +533,7 @@ def confusion_matrix_of_site_satellite_resolution(
                                   predictions=predictions,
                                   class_names=satellite_classes,
                                   plot_filename=plot_filename,
-                                  title=f"{int(method_2_threshold*100)}% Sampling Purity; Time index",
+                                  title=f"{int(method_2_threshold*100)}% Sampling Purity; Time index: {time_index}",
                                   )
 
     # Force free memory

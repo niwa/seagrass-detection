@@ -13,6 +13,7 @@ CRS_WSG = 4326
 CRS_NZTM = 2193
 
 UAV_NAN_CLASS = -128
+CLASSIFICATION_DTYPE = numpy.int8
 
 def get_data_path():
     """Get the path to the data folder."""
@@ -191,12 +192,13 @@ def save_netcdf(data: xarray.Dataset, filename):
                    engine="netcdf4", encoding=encoding)
 
 
-def load_satellite(filename: pathlib):
+def load_satellite(filename: pathlib, chunks: bool = None, masked: bool = True):
     """Load in a multiband satellite iamge."""
     satellite_data = rioxarray.rioxarray.open_rasterio(
             filename,
             parse_coordinates=True,
-            masked=True
+            masked=masked,
+            chunks=chunks
         )
     return satellite_data
 
