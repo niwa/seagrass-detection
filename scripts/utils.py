@@ -164,6 +164,17 @@ def save_tiff(data: xarray.Dataset, filename):
     data.rio.to_raster(filename, compress="ZSTD", zstd_level=4)
 
 
+def ensure_grid_indexing(data: xarray.Dataset):
+    """Order for correct display in GIS programs."""
+
+    # Ensure y increasing for correct display in GIS
+    if data.y[0] > data.y[-1]:
+        data = data.isel(y=slice(None, None, -1))
+        write_netcdf_conventions_in_place(data)
+        print("\tFlipped array")
+    return data
+
+
 def save_netcdf(data: xarray.Dataset, filename):
     """Save rioxarray as a netcdf with compression
     and appropriate encoding."""

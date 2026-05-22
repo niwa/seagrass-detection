@@ -40,6 +40,7 @@ BANDS = [
     "B8A",
     "SCL",
 ]
+RGB_BANDS = ["B04", "B02", "B03"]
 SCL_TO_IGNORE = [
     1,  # SATURATED_OR_DEFECTIVE
     8,  # CLOUD_MEDIUM_PROBABILITY
@@ -175,6 +176,27 @@ def get_low_tide_images_in_year(geometry, year: int):
     )
 
     return data
+
+
+def get_satellite_for_date(geometry, date_YYMMDD: str):
+    """Reture satellite images near the survey date near low tide."""
+    geometry_WSG = geometry.buffer(S2_RESOLUTION).to_crs(
+        utils.CRS_WSG
+    )  # ensure includes pixles on edge
+
+    search_collection = leafmap.stac_search(
+        url=CATALOGUE_URL,
+        max_items=400,
+        collections=[COLLECTION],
+        bbox=geometry_WSG.total_bounds,
+        datetime=f"{date_YYMMDD}",
+        sortby=[{"field": "properties.eo:cloud_cover", "direction": "asc"}],
+        get_collection=True,
+    )
+
+    items = search_collection.items
+
+    return items
 
 
 def get_low_tide_no_cloud_images_near_date(
@@ -330,3 +352,25 @@ def harmonize_post_2022(data, date, debug: bool = False):
                 data[band].clip(min=1000) - BAND_OFFSET_POST_2022_01_25
             )
     return data
+
+
+def get_satellite_info(geometry, date_YYMMDD):
+    items = get_satellite_for_date(geometry=geometry, date_YYMMDD=date_YYMMDD)
+
+    tile_id = ""; percentage_2 = ""; percentage_98 = ""
+    for item in items:
+        tile_id += f"{item.id}, "
+        stats=leafmap.stac_stats(collection=COLLECTION,
+                                 item=item.id,
+                                 titiler_endpoint="pc",
+                                 assets=RGB_BANDS)
+        percentage_2_i = []; percentage_98_i = []
+        for key, value in stats.items():
+            percentage_2_i.append(value['percentile_2'])
+            percentage_98_i.append(value['percentile_98'])
+        percentage_2_i = numpy.array(percentage_2_i).mean()
+        percentage_98_i = numpy.array(percentage_98_i).mean()
+        percentage_2 += f"{round(percentage_2_i)}, "
+        percentage_98 += f"{round(percentage_98_i)}, "
+    return tile_id, percentage_2, percentage_98
+            
