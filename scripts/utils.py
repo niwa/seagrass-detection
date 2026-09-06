@@ -167,11 +167,11 @@ def save_tiff(data: xarray.Dataset, filename):
 def ensure_grid_indexing(data: xarray.Dataset):
     """Order for correct display in GIS programs."""
 
-    # Ensure y increasing for correct display in GIS
-    if data.y[0] > data.y[-1]:
+    # Keep rows ordered north to south, as expected by raster GIS software.
+    if data.y[0] < data.y[-1]:
         data = data.isel(y=slice(None, None, -1))
         write_netcdf_conventions_in_place(data)
-        print("\tFlipped array")
+        print("\tFlipped array to north-up orientation")
     return data
 
 
@@ -179,11 +179,7 @@ def save_netcdf(data: xarray.Dataset, filename):
     """Save rioxarray as a netcdf with compression
     and appropriate encoding."""
 
-    # Ensure y increasing for correct display in GIS
-    if data.y[0] > data.y[-1]:
-        data = data.isel(y=slice(None, None, -1))
-        write_netcdf_conventions_in_place(data)
-        print("\tFlipped array prior to saving")
+    data = ensure_grid_indexing(data)
 
     # print(f"\tsaving {filename.name}")
     encoding = {}
