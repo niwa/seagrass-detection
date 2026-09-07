@@ -9,13 +9,14 @@ import xarray
 import pandas
 import scipy
 import sklearn.ensemble
+import sklearn.model_selection
 import joblib
 import numpy
 import pathlib
 import matplotlib.pyplot
 
 
-def train_classifier(
+def get_training_data_across_sites(
     training_sites: list,
     samples_path: pathlib.Path,
     uav_labels_file: pathlib.Path,
@@ -24,16 +25,95 @@ def train_classifier(
     satellite_from_uav_classes: dict,
 ):
     """Combine all training datasets then drop the UAV classes to ignore
-    and map the UAV classes to the satellite classes. Train a random
-    forest classifier and return."""
+    and map the UAV classes to the satellite classes."""
+
+    samples_dataframe = load_samples(training_sites=training_sites,
+                                     samples_path=samples_path)
 
     training_dataframe = map_satellite_ids_into_samples(
-        training_sites=training_sites,
-        samples_path=samples_path,
+        samples_dataframe=samples_dataframe,
         uav_labels_file=uav_labels_file,
         uav_classes_to_ignore=uav_classes_to_ignore,
         satellite_classes=satellite_classes,
-        satellite_from_uav_classes=satellite_from_uav_classes)
+        satellite_from_uav_classes=satellite_from_uav_classes,
+        drop_scl_classes_to_ignore=True)
+
+    return training_dataframe
+
+
+def get_training_data_across_sites_excluding_one_site_date(
+    training_sites: list,
+    test_site: str,
+    test_date: str,
+    samples_path: pathlib.Path,
+    uav_labels_file: pathlib.Path,
+    uav_classes_to_ignore: dict,
+    satellite_classes: dict,
+    satellite_from_uav_classes: dict,
+):
+    """Combine all training datasets then drop the UAV classes to ignore
+    and map the UAV classes to the satellite classes. Exclude the test
+    site and date."""
+
+    samples_dataframe = load_samples_excluding_test_date(
+        training_sites=training_sites,
+        samples_path=samples_path,
+        test_site=test_site,
+        test_date=test_date
+    )
+
+
+    training_dataframe = map_satellite_ids_into_samples(
+        samples_dataframe=samples_dataframe,
+        uav_labels_file=uav_labels_file,
+        uav_classes_to_ignore=uav_classes_to_ignore,
+        satellite_classes=satellite_classes,
+        satellite_from_uav_classes=satellite_from_uav_classes,
+        drop_scl_classes_to_ignore=True)
+
+    return training_dataframe
+
+
+def randomise_to_test_and_training_across_sites(
+    training_sites: list,
+    samples_path: pathlib.Path,
+    uav_labels_file: pathlib.Path,
+    uav_classes_to_ignore: dict,
+    satellite_classes: dict,
+    satellite_from_uav_classes: dict,
+    test_threshold: float,
+):
+    """Combine all training datasets then drop the UAV classes to ignore
+    and map the UAV classes to the satellite classes. Train a random
+    forest classifier and return."""
+
+    samples_dataframe = load_samples(training_sites=training_sites,
+                                     samples_path=samples_path)
+
+    training_dataframe = map_satellite_ids_into_samples(
+        samples_dataframe=samples_dataframe,
+        uav_labels_file=uav_labels_file,
+        uav_classes_to_ignore=uav_classes_to_ignore,
+        satellite_classes=satellite_classes,
+        satellite_from_uav_classes=satellite_from_uav_classes,
+        drop_scl_classes_to_ignore=True)
+
+    training_dataframe, test_dataframe = sklearn.model_selection.train_test_split(
+        training_dataframe,
+        test_size=test_threshold,
+        stratify=training_dataframe["satellite_class_id"],
+    )
+
+    training_dataframe = training_dataframe.reset_index(drop=True)
+    test_dataframe = test_dataframe.reset_index(drop=True)
+
+    return training_dataframe, test_dataframe
+
+
+def train_random_forest_classifier(
+    training_dataframe: pandas.DataFrame,
+):
+    """Train a random forest classifier for a given training dataframe."""
 
     print("\tTrain a Random Forest Model")
     training_classes = numpy.array(training_dataframe["satellite_class_id"])
@@ -44,7 +124,7 @@ def train_classifier(
     classifier = sklearn.ensemble.RandomForestClassifier()
     model = classifier.fit(training_observations, training_classes)
 
-    return model, training_dataframe, model_columns
+    return model, model_columns
 
 
 def load_samples(
@@ -63,19 +143,48 @@ def load_samples(
     return samples_dataframe
 
 
-def map_satellite_ids_into_samples(
+def load_samples_excluding_test_date(
     training_sites: list,
     samples_path: pathlib.Path,
+    test_site: str,
+    test_date: str,
+) -> pandas.DataFrame:
+    """Combine all training datasets and return, excluding the test site at the given date."""
+
+    print(f"\tLoad in sites: {training_sites}")
+    samples_dataframe = []
+    for training_site in training_sites:
+        samples_file = samples_path / f"{training_site}_training_data.csv"
+        sample_dataframe = pandas.read_csv(samples_file)
+        if training_site == test_site:
+            sample_dates = pandas.to_datetime(sample_dataframe["time"]).dt.normalize()
+            test_date_normalized = pandas.to_datetime(test_date).normalize()
+            if not sample_dates.eq(test_date_normalized).any():
+                print(
+                    f"Warning: test date {test_date} is not present in "
+                    f"the samples for site {test_site}."
+                )
+            sample_dataframe = sample_dataframe[
+                sample_dates != test_date_normalized
+            ]
+
+        samples_dataframe.append(sample_dataframe)
+    samples_dataframe = pandas.concat(samples_dataframe, ignore_index=True)
+
+    return samples_dataframe
+
+
+def map_satellite_ids_into_samples(
+    samples_dataframe: pandas.DataFrame,
     uav_labels_file: pathlib.Path,
     uav_classes_to_ignore: dict,
     satellite_classes: dict,
     satellite_from_uav_classes: dict,
+    drop_scl_classes_to_ignore: bool,
 ):
-    """Combine all training datasets then drop the UAV classes to ignore
-    and map the UAV classes to the satellite classes."""
-
-    samples_dataframe = load_samples(training_sites=training_sites,
-                                      samples_path=samples_path)
+    """For a given samples dataframe then drop the UAV classes to ignore
+    and map the UAV classes to the satellite classes. Option to drop SCL
+    cloud classes."""
 
     print("\tMap UAV training ids to the specified satellite training ids")
     uav_training_labels = (
@@ -100,7 +209,59 @@ def map_satellite_ids_into_samples(
             samples_dataframe["uav_class_id"].isin(class_ids_to_map),
             "satellite_class_id",
         ] = satellite_classes[key]
+
+    # Drop SCL classes to ignore
+    if drop_scl_classes_to_ignore:
+        samples_dataframe = samples_dataframe[
+            ~samples_dataframe["SCL"].isin(sentinel2.SCL_TO_IGNORE)
+        ]
     return samples_dataframe
+
+
+def predict_site_for_date(
+    test_satellite_file: pathlib.Path,
+    polygon_file: pathlib.Path,
+    model_file: pathlib.Path,
+    model_feature_names_file: pathlib.Path,
+    time_index: int,
+):
+    """Predict classes for one satellite image. Load feature names to ensure the same order."""
+
+    satellite_data = utils.load_satellite(filename=test_satellite_file)
+    uav_polygon = geopandas.read_file(polygon_file)
+    model = joblib.load(model_file)
+    model_columns = pandas.read_csv(model_feature_names_file)
+
+    print(f"\tPredict satellite image at time index {time_index}")
+    observations_to_predict = (
+        satellite_data.isel(time=time_index)[model_columns.columns]
+        .to_array()
+        .stack(dims=["y", "x"])
+        .transpose()
+    )
+
+    predictions = model.predict(observations_to_predict)
+    # probabilities = model.predict_proba(observations_to_predict)
+    predictions = predictions.reshape(
+        len(satellite_data.y), len(satellite_data.x)
+    ).astype(utils.CLASSIFICATION_DTYPE)
+
+    predictions = xarray.DataArray(
+        [predictions],
+        coords={
+            "time": numpy.atleast_1d(satellite_data["time"][time_index]),
+            "y": satellite_data.y,
+            "x": satellite_data.x,
+        },
+        dims=["time", "y", "x"],
+    )
+
+    predictions.rio.write_crs(input_crs=utils.CRS_NZTM, inplace=True)
+    predictions = predictions.rio.clip(
+        uav_polygon.geometry, all_touched=True, drop=True
+    )
+
+    return predictions
 
 
 def predict_site(
@@ -109,47 +270,24 @@ def predict_site(
     model_file: pathlib.Path,
     model_feature_names_file: pathlib.Path
 ):
-    """Predict classes for satellite image across all time steps. Load feature names to ensure the same order"""
+    """Predict classes for satellite images across all time steps."""
 
     satellite_data = utils.load_satellite(filename=test_satellite_file)
-    uav_polygon = geopandas.read_file(polygon_file)
-    model = joblib.load(model_file)
-    model_columns = pandas.read_csv(model_feature_names_file)
-
     predictions = []
     print(f"\tPredict for {len(satellite_data['time'])} satellite images")
     for time_index in range(len(satellite_data["time"])):
-        # Predictions
-        observations_to_predict = (
-            satellite_data.isel(time=time_index)[model_columns.columns]
-            .to_array()
-            .stack(dims=["y", "x"])
-            .transpose()
+        predictions.append(
+            predict_site_for_date(
+                test_satellite_file=test_satellite_file,
+                polygon_file=polygon_file,
+                model_file=model_file,
+                model_feature_names_file=model_feature_names_file,
+                time_index=time_index,
+            )
         )
 
-        predictions_i = model.predict(observations_to_predict)
-        # probabilities = model.predict_proba(observations_to_predict)
-        predictions_i = predictions_i.reshape(
-            len(satellite_data.y), len(satellite_data.x)
-        ).astype(utils.CLASSIFICATION_DTYPE)
-
-        predictions_i = xarray.DataArray(
-            [predictions_i],
-            coords={
-                "time": numpy.atleast_1d(satellite_data["time"][time_index]),
-                "y": satellite_data.y,
-                "x": satellite_data.x,
-            },
-            dims=["time", "y", "x"],
-        )
-        predictions.append(predictions_i)
-
-    print("\tCombine predictions and clip to polygon")
+    print("\tCombine predictions and write conventions")
     predictions = xarray.concat(predictions, dim="time")
-    predictions.rio.write_crs(input_crs=utils.CRS_NZTM, inplace=True)
-    predictions = predictions.rio.clip(
-        uav_polygon.geometry, all_touched=True, drop=True
-    )
     utils.write_netcdf_conventions_in_place(predictions)
 
     return predictions, satellite_data
@@ -287,6 +425,23 @@ def confusion_matrix_of_site(
     )
 
     return all_truth, all_predictions
+
+
+def confusion_matrix_of_pixels(
+    predictions: pandas.DataFrame,
+    satellite_classes: dict,
+    plot_filename: pathlib.Path,
+    plot_title: str,
+):
+    """Calculate the normalized confusion matrix for pixel classifications."""
+
+    plot_confusion_matrix(
+        truth=predictions["satellite_class_id"],
+        predictions=predictions["predicted_class_id"],
+        class_names=satellite_classes,
+        plot_filename=overall_plot_filename,
+        title=overall_plot_title,
+        )
 
 
 def plot_model_feature_importance(training_dataframe, model_file):

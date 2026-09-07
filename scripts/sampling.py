@@ -201,7 +201,142 @@ def training_data_from_images_method_1(satellite_data, uav_data, labels):
     return training_spectrum
 
 
+def get_site_satellite(
+    site_name: str,
+    survey_dates_file: pathlib.Path,
+    lowtide_search_range: int,
+    low_tide_delta: int,
+    uav_folder: pathlib.Path,
+    max_cloud_cover: float,
+):
+    """Given a site download the corresponding satellite data around low tide with low cloud cover."""
+
+    print(f"Site {site_name}")
+    uav_file = uav_folder / f"{site_name}_classified.tif"
+    satellite_file = utils.get_satellite_path(site_name=site_name, low_tide_delta=low_tide_delta, max_cloud_cover=max_cloud_cover)
+    if satellite_file.exists():
+        print("\tSatellite file already exists")
+        return
+    
+    # load classified UAV - ensure is to nztm
+    if not uav_file.exists():
+        print("\tWARNING - no classified image")
+        raise ValueError(f"Missing classified image for site {site_name}")
+    else:
+        uav_data = utils.load_classification(
+            filename=uav_file,
+            chunks=True
+        )
+        
+    # create or load area polygon
+    polygon_file = utils.get_site_polygon_path(site_name)
+    if not polygon_file.exists():
+        print("\tsave polygon of the site")
+        coarsen_ratio = max(numpy.ceil(sentinel2.S2_RESOLUTION / abs(numpy.array(uav_data.rio.resolution()))).astype(int))
+        uav_polygon = utils.mask_to_polygons(uav_data.notnull(), coarsen_ratio=coarsen_ratio)
+        uav_polygon.to_file(polygon_file)
+    else:
+        uav_polygon = geopandas.read_file(polygon_file)
+
+    # download low tide satellite with low cloud
+    print("\tSave satellite image of the site around lowtide without cloud")
+
+    satellite_data = sentinel2.get_low_tide_no_cloud_images_near_date(
+        site_name=site_name,
+        geometry=uav_polygon,
+        max_cloud_cover=max_cloud_cover,
+        date_file=survey_dates_file,
+        low_tide_search_days=lowtide_search_range,
+        low_tide_delta=low_tide_delta,
+    )
+    if len(satellite_data['time']) == 0:
+        print("Warning: No satellite data without cloud. Ignore")
+    else:
+        utils.write_netcdf_conventions_in_place(satellite_data)
+        satellite_data = satellite_data.rio.reproject(utils.CRS_NZTM)
+        satellite_data = satellite_data.rio.clip(uav_polygon.geometry, drop=True, all_touched=True)
+        utils.write_netcdf_conventions_in_place(satellite_data)
+        utils.save_netcdf(satellite_data, satellite_file)
+
+
 def sample_site(
+    site_name: str,
+    training_labels_file: pathlib.Path,
+    uav_folder: pathlib.Path,
+    max_cloud_cover: int,
+    low_tide_delta: int,
+    sample_method: str,
+    method_2_threshold: float = None,
+):
+    """Given a site extract training data."""
+
+    print(f"Site {site_name}")
+    training_labels = pandas.read_csv(
+        training_labels_file, sep="\t", header=None, names=["Value", "Key"]
+    ).set_index('Key')['Value'].to_dict()
+    
+    # load classified UAV - ensure is to nztm
+    uav_file = uav_folder / f"{site_name}_classified.tif"
+    if not uav_file.exists():
+        print("\tWARNING - no classified image")
+        raise ValueError(f"Missing classified image for site {site_name}")
+    else:
+        uav_data = utils.load_classification(
+            filename=uav_file,
+            chunks=True
+        )
+
+    # get or load low tide satellite with no cloud
+    satellite_file = utils.get_satellite_path(site_name=site_name, low_tide_delta=low_tide_delta, max_cloud_cover=max_cloud_cover)
+    if not satellite_file.exists():
+        raise ValueError(
+            f"Missing satellite image for site {site_name}. Try running `get_site_satellite` first. "
+             f"satellite_file: {satellite_file}")
+    satellite_data = utils.load_satellite(filename=satellite_file)
+
+    # Extract training dataset
+    training_file = utils.get_training_data_path(
+        site_name=site_name, sample_method=sample_method, method_2_threshold=method_2_threshold,
+        low_tide_delta=low_tide_delta, max_cloud_cover=max_cloud_cover
+    )
+    if not training_file.exists():
+        print("Construct training data from UAV and Satellite imagery")
+        training_file.parent.mkdir(exist_ok=True)
+        if sample_method == "sampling_1":
+            training_observations = training_data_from_images_method_1(
+                satellite_data=satellite_data,
+                uav_data=uav_data,
+                labels=training_labels
+            )
+        elif sample_method == "sampling_2":
+            training_observations = training_data_from_images_method_2(
+                satellite_data=satellite_data,
+                uav_data=uav_data,
+                labels=training_labels, 
+                threshold = method_2_threshold
+            )
+        else:
+            raise ValueError(f"Invalid sample method: {sample_method}")
+        training_observations.drop(columns=["x", "y"]).to_csv(training_file, index=False)
+        # Save a gpkg of this
+        training_observations_points = geopandas.GeoDataFrame(
+            training_observations,
+            geometry=geopandas.points_from_xy(training_observations.x, training_observations.y),
+            crs=utils.CRS_NZTM
+        )
+        training_observations_points.to_file(training_file.with_suffix(".gpkg"))
+        del training_observations_points
+    else:
+        training_observations = pandas.read_csv(training_file)
+    
+    summary=pandas.DataFrame(training_observations['uav_class_id'].value_counts())
+    summary["uav_class_name"] = summary.index.map(lambda index: next((key for key, value in training_labels.items() if value == int(index)), None) )
+    summary = summary[["uav_class_name", "count"]]
+    summary.to_csv(training_file.with_stem(f"{training_file.stem}_summary"))
+    summary
+
+
+def get_satellite_sample_site(
     site_name: str,
     survey_dates_file: pathlib.Path,
     lowtide_search_range_file: pathlib.Path,
@@ -242,7 +377,7 @@ def sample_site(
         uav_polygon = geopandas.read_file(polygon_file)
 
     # get or load low tide satellite with no cloud
-    satellite_file = utils.get_satellite_training_path(site_name=site_name)
+    satellite_file = utils.get_satellite_path(site_name=site_name)
     if not satellite_file.exists():
         print("\tSave satellite image of the site around lowtide without cloud")
     
@@ -304,9 +439,11 @@ def sample_site(
     summary.to_csv(training_file.with_stem(f"{training_file.stem}_summary"))
     summary
 
-def site_sample_counts_by_class(sample_method: str, method_2_threshold: float):
+def site_sample_counts_by_class(sample_method: str, method_2_threshold: float,
+                                max_cloud_cover: int, low_tide_delta: int):
     """Summarise the number of samples for each class for each site and save to csv."""
-    samples_folder_path = utils.get_samples_path(sample_method, method_2_threshold)
+    samples_folder_path = utils.get_samples_path(sample_method, method_2_threshold,
+                                                 max_cloud_cover=max_cloud_cover, low_tide_delta=low_tide_delta)
     counts_summary = []
     site_names = []
     for site_summary_file in samples_folder_path.glob("*_training_data_summary.csv"):
@@ -316,5 +453,6 @@ def site_sample_counts_by_class(sample_method: str, method_2_threshold: float):
     counts_summary = pandas.concat(counts_summary, keys=site_names).reset_index(
         level=0, names="Site")[["Site","uav_class_name", "count"]].pivot(index="Site", columns="uav_class_name",values="count")
     counts_summary = counts_summary.fillna(0)
-    counts_summary.to_csv(utils.get_samples_summary_file_path(sample_method, method_2_threshold))
+    counts_summary.to_csv(utils.get_samples_summary_file_path(sample_method, method_2_threshold,
+                                                              max_cloud_cover=max_cloud_cover, low_tide_delta=low_tide_delta))
     return counts_summary

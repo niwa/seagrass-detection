@@ -72,7 +72,7 @@ def get_satellite_date_range(site_name: str, date_file: pathlib.Path,
 
 
 def get_low_tide_images_near_date(
-    site_name, geometry, date_file, low_tide_search_days
+    site_name, geometry, date_file, low_tide_search_days, low_tide_delta
 ):
     """Return satellite images near the survey date near low tide."""
     date_range = get_satellite_date_range(
@@ -100,11 +100,11 @@ def get_low_tide_images_near_date(
     low_tide = []
     for item in items:
         low_tide.append(
-            check_low_tide(item, lat=lat, lon=lon)
+            check_low_tide(item, lat=lat, lon=lon, low_tide_delta=low_tide_delta)
         )
     items = [item for item, low_tide in zip(items, low_tide) if low_tide]
 
-    # Keep all near lowtide and keep only those with no cloud cover
+    # Keep all near lowtide
     data = odc.stac.load(
         items,
         bbox=geometry_WSG.total_bounds,
@@ -127,7 +127,7 @@ def get_low_tide_images_near_date(
     return data
 
 
-def get_low_tide_images_in_year(geometry, year: int):
+def get_low_tide_images_in_year(geometry, year: int, low_tide_delta: int):
     """Reture satellite images near the survey date near low tide."""
     geometry_WSG = geometry.buffer(S2_RESOLUTION).to_crs(
         utils.CRS_WSG
@@ -150,7 +150,7 @@ def get_low_tide_images_in_year(geometry, year: int):
     low_tide = []
     for index, item in enumerate(items):
         low_tide.append(
-            check_low_tide(item, lat=lat, lon=lon)
+            check_low_tide(item, lat=lat, lon=lon, low_tide_delta=low_tide_delta)
         )
 
     items = [item for item, low_tide in zip(items, low_tide) if low_tide]
@@ -201,27 +201,28 @@ def get_satellite_for_date(geometry, date_YYMMDD: str):
 
 def get_low_tide_no_cloud_images_near_date(
     site_name, geometry, max_cloud_cover, date_file,
-    low_tide_search_days
+    low_tide_search_days, low_tide_delta
 ):
 
     data = get_low_tide_images_near_date(
-        site_name, geometry, date_file, low_tide_search_days
+        site_name, geometry, date_file, low_tide_search_days, low_tide_delta
     )
     number_of_low_tide_dates = len(data["time"])
 
     # keep only values with less cloud cover than the specified percentatge
+    cloud_cover_percentage = (
+                100
+                * data["SCL"].isin(SCL_TO_IGNORE).sum(dim=["x", "y"]).compute()
+                / len(data["SCL"].data.flatten())
+            )
     data = data.where(
-        (
-            100
-            * data["SCL"].isin(SCL_TO_IGNORE).sum(dim=["x", "y"]).compute()
-            / len(data["SCL"].data.flatten())
-        )
-        <= max_cloud_cover,
+        cloud_cover_percentage <= max_cloud_cover,
         drop=True,
     )
     print(
         f"\tNo cloud tiles: {len(data['time'])} from the low tide tiles of "
-        f"{number_of_low_tide_dates}"
+        f"{number_of_low_tide_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
+        f"Kept {cloud_cover_percentage.data <= max_cloud_cover}"
     )
 
     # Harmonize any post-2022 data - TODO - do for float32 too
@@ -238,10 +239,10 @@ def get_low_tide_no_cloud_images_near_date(
 
 
 def get_low_tide_no_cloud_images_in_year(
-    geometry, max_cloud_cover, year: int
+    geometry, max_cloud_cover, year: int, low_tide_delta: int
 ):
 
-    data = get_low_tide_images_in_year(geometry, year)
+    data = get_low_tide_images_in_year(geometry, year, low_tide_delta=low_tide_delta)
     number_of_low_tide_dates = len(data["time"])
 
     # keep only values with less cloud cover than the specified percentatge
@@ -307,7 +308,7 @@ def get_low_tide(item, lat, lon):
     return time_from_low_tide
 
 
-def check_low_tide(item, lat, lon):
+def check_low_tide(item, lat, lon, low_tide_delta: int = LOW_TIDE_DELTA):
     """Check if satellite images were taken during low tide."""
 
     dotenv.load_dotenv()
@@ -319,7 +320,7 @@ def check_low_tide(item, lat, lon):
         item.properties["datetime"], SATELLITE_DATE_FORMAT
     )
     start_date = (
-        date_and_time - datetime.timedelta(hours=LOW_TIDE_DELTA)
+        date_and_time - datetime.timedelta(hours=low_tide_delta)
         ).strftime(DATE_FORMAT_YYYYMMDD)
     tide_url = (
         f"{TIDE_API_STUB}?lat={lat}&long={lon}&datum=MSL"
@@ -336,8 +337,9 @@ def check_low_tide(item, lat, lon):
                 datetime.datetime.strptime(tide_time["time"], TIDE_DATE_FORMAT)
                 - date_and_time
             )
-            if time_diff < datetime.timedelta(hours=LOW_TIDE_DELTA):
+            if time_diff < datetime.timedelta(hours=low_tide_delta):
                 low_tide = True
+                print(f"\tTime from low tide: {time_diff} for {item.id}")
                 break
     return low_tide
 
