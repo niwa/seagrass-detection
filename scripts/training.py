@@ -3,6 +3,7 @@
 import utils
 import sentinel2
 import sampling
+import plotting
 import gc
 import geopandas
 import xarray
@@ -486,11 +487,11 @@ def confusion_matrix_of_site_for_date(
     del sat_prediction_data
     gc.collect()
 
-    plot_confusion_matrix(truth=truth,
-                          predictions=predictions,
-                          class_names=satellite_classes,
-                          plot_filename=plot_filename,
-                          title=f"{int(method_2_threshold*100)}% Sampling Purity; {date}",
+    plotting.plot_confusion_matrix(truth=truth,
+                                   predictions=predictions,
+                                   class_names=satellite_classes,
+                                   plot_filename=plot_filename,
+                                   title=f"{int(method_2_threshold*100)}% Sampling Purity; {date}",
     )
 
     return truth, predictions
@@ -505,13 +506,18 @@ def confusion_matrix_of_site(
     uav_classes_to_ignore,
     polygon_file,
     method_2_threshold,
+    match_satellite_resolution=False,
 ):
 
     debug=False
 
+    resolution_label = (
+            f"_{sentinel2.S2_RESOLUTION}_resolution" if match_satellite_resolution else ""
+        )
+
     # Exit if the plots have already been created.
     overall_plot_filename = prediction_file.with_name(
-            f"{prediction_file.stem}_confusion_matrix_time_all_dates.png"
+            f"{prediction_file.stem}_confusion_matrix{resolution_label}_all_dates.png"
         )
     if overall_plot_filename.exists():
         print(f"{overall_plot_filename.name} already exists."
@@ -528,7 +534,7 @@ def confusion_matrix_of_site(
         satellite_from_uav_classes=satellite_from_uav_classes,
         uav_classes_to_ignore=uav_classes_to_ignore,
         polygon_file=polygon_file,
-        match_satellite_resolution=False,
+        match_satellite_resolution=match_satellite_resolution,
     )
 
     # Pull out the predictions vs ground truth
@@ -537,7 +543,7 @@ def confusion_matrix_of_site(
     for time_index in range(len(sat_prediction_data["time"])):
 
         plot_filename = prediction_file.with_name(
-            f"{prediction_file.stem}_confusion_matrix_time_{time_index}.png"
+            f"{prediction_file.stem}_confusion_matrix{resolution_label}_date_{time_index}.png"
         )
 
         print(f"\tExtract truth and predictions time index: {time_index}")
@@ -554,11 +560,11 @@ def confusion_matrix_of_site(
                 print(f"\t\t{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
                 continue
             print(f"\t\tConstruct confusion matrix")
-            plot_confusion_matrix(truth=truth,
-                                  predictions=predictions,
-                                  class_names=satellite_classes,
-                                  plot_filename=plot_filename,
-                                  title= f"{int(method_2_threshold*100)}% Sampling Purity; Time index {time_index}",
+            plotting.plot_confusion_matrix(truth=truth,
+                                           predictions=predictions,
+                                           class_names=satellite_classes,
+                                           plot_filename=plot_filename,
+                                           title= f"{int(method_2_threshold*100)}% Sampling Purity; Time index {time_index}",
             )
             matplotlib.pyplot.close()
 
@@ -569,11 +575,11 @@ def confusion_matrix_of_site(
     print("Overall confusion matrix across prediction dates")
     all_truth = numpy.concatenate(all_truth)
     all_predictions = numpy.concatenate(all_predictions)
-    plot_confusion_matrix(truth=all_truth,
-                          predictions=all_predictions,
-                          class_names=satellite_classes,
-                          plot_filename=overall_plot_filename,
-                          title= f"{int(method_2_threshold*100)}% Sampling Purity",
+    plotting.plot_confusion_matrix(truth=all_truth,
+                                   predictions=all_predictions,
+                                   class_names=satellite_classes,
+                                   plot_filename=overall_plot_filename,
+                                   title= f"{int(method_2_threshold*100)}% Sampling Purity",
     )
 
     return all_truth, all_predictions
@@ -587,213 +593,10 @@ def confusion_matrix_of_pixels(
 ):
     """Calculate the normalized confusion matrix for pixel classifications."""
 
-    plot_confusion_matrix(
+    plotting.plot_confusion_matrix(
         truth=predictions["satellite_class_id"],
         predictions=predictions["predicted_class_id"],
         class_names=satellite_classes,
         plot_filename=plot_filename,
         title=plot_title,
         )
-
-
-def plot_model_feature_importance(training_dataframe, model_file):
-    """Plot the feature importance of the trained random forest model."""
-
-    plot_filename = model_file.with_name(f"{model_file.stem}_random_forest_feature_importance.png")
-    if plot_filename.exists():
-        print(f"{plot_filename.name} already exists. Delete if you've updated the "
-              "model and want to regenerate")
-    else:
-        model = joblib.load(model_file)
-        importance_df = pandas.DataFrame(
-            {'Feature': training_dataframe.drop(columns=["satellite_class_id", "uav_class_id", "time"]).columns,
-             'Importance': model.feature_importances_})
-        importance_df.sort_values(by='Importance', ascending=False).plot(kind='bar', x='Feature', y='Importance')
-        matplotlib.pyplot.savefig(model_file.with_name(f"{model_file.stem}_random_forest_feature_importance.png"), dpi=300)
-
-def plot_uav_classes(training_dataframe, uav_labels_file):
-    """Plot the UAV classes in the samples dataframe and return the figure"""
-    uav_training_labels = (
-        pandas.read_csv(uav_labels_file, sep="\t", header=None, names=["Value", "Key"])
-        .set_index("Key")["Value"]
-        .to_dict()
-    )
-    y_limits=(0, 6500)
-
-    # Plot satellite bands for UAV classes
-    number_uav_classes = len(training_dataframe["uav_class_id"].unique())
-    nrows = int(numpy.ceil(number_uav_classes/3))
-    figure, axes = matplotlib.pyplot.subplots(nrows=nrows, ncols=3, figsize=(21, 6*nrows))
-
-    for i, (class_id, ax) in enumerate(zip(training_dataframe["uav_class_id"].unique(), axes.flat)):
-
-        class_name = next((key for key, value in uav_training_labels.items() if value == class_id), None)
-
-        training_dataframe[training_dataframe["uav_class_id"] == class_id].drop(columns=["SCL", "uav_class_id", "satellite_class_id"]).plot(kind='box', ax=ax, ylim=y_limits)
-        ax.set_title(f"Spectral plot for class ID {class_name}")
-    return figure
-
-def plot_satellite_classes(training_dataframe, satellite_labels):
-    """Plot the satellite classes in the samples dataframe and return the figure"""
-
-    y_limits=(0, 6500)
-
-    # Plot satellite bands for satellite classes
-    nrows = int(numpy.ceil(len(satellite_labels)/3))
-    figure, axes = matplotlib.pyplot.subplots(nrows=nrows, ncols=3, figsize=(21, 6*nrows))
-    for i, (class_name, ax) in enumerate(zip(satellite_labels.keys(), axes.flat)):
-
-        class_id = satellite_labels[class_name]
-
-        training_dataframe[training_dataframe["satellite_class_id"] == class_id].drop(columns=["SCL", "satellite_class_id", "uav_class_id"]).plot(kind='box', ax=ax, ylim=y_limits)
-        ax.set_title(f"Spectral plot for class ID {class_name}")
-    return figure
-
-
-def save_samples_uav_classes(plot_filename, training_dataframe, uav_labels_file):
-    """Plot and save the UAV classes in the samples dataframe and return the figure"""
-    figure = plot_uav_classes(training_dataframe=training_dataframe, uav_labels_file=uav_labels_file)
-    figure.savefig(plot_filename, dpi=300)
-
-
-def save_samples_satellite_classes(plot_filename, training_dataframe, satellite_labels):
-    """Plot and save the satellite classes in the samples dataframe and return the figure"""
-    figure = plot_satellite_classes(training_dataframe=training_dataframe, satellite_labels=satellite_labels)
-    figure.savefig(plot_filename, dpi=300)
-
-
-def plot_training_data_class_distribution(training_dataframe, model_file, uav_labels_file, satellite_labels):
-    """Plot the class distribution of the training data."""
-
-    # Plot satellite bands for UAV classes
-    plot_filename = model_file.with_name(f"{model_file.stem}_training_uav_class_IDs.png")
-    if plot_filename.exists():
-        print(f"{plot_filename.name} already exists. Delete if you've updated the model"
-              " and want to regenerate")
-    else:
-        save_samples_uav_classes(plot_filename=plot_filename,
-                                 training_dataframe=training_dataframe,
-                                 uav_labels_file=uav_labels_file)
-
-    # Plot satellite bands for the satellite class used for prediction
-    plot_filename = model_file.with_name(f"{model_file.stem}_training_satellite_class_IDs.png")
-    if plot_filename.exists():
-        print(f"{plot_filename.name} already exists. Delete if you've updated the model"
-              " and want to regenerate")
-    else:
-        save_samples_satellite_classes(plot_filename=plot_filename,
-                                 training_dataframe=training_dataframe,
-                                 satellite_labels=satellite_labels)
-
-
-def plot_confusion_matrix(
-    truth,
-    predictions,
-    class_names: dict,
-    plot_filename: pathlib.Path,
-    title: str
-):
-    """ Create a confusion matrix with the class names """
-    label_values = numpy.unique(numpy.concat([numpy.unique(truth), numpy.unique(predictions)]))
-    label_names = [key for key, value in class_names.items() if value in label_values]
-
-    confusion_matrix = sklearn.metrics.confusion_matrix(
-        truth, predictions, normalize="true"
-    )
-    display = sklearn.metrics.ConfusionMatrixDisplay(
-        confusion_matrix=confusion_matrix, display_labels=label_names
-    )
-
-    _, ax = matplotlib.pyplot.subplots(figsize=(10, 10))
-    display.plot(
-        ax=ax,
-        cmap=matplotlib.pyplot.cm.Blues,
-        values_format='.1%'
-    )
-    matplotlib.pyplot.xticks(rotation=90)
-    matplotlib.pyplot.tight_layout()
-    matplotlib.pyplot.title(title)
-    matplotlib.pyplot.savefig(plot_filename, dpi=300, )
-
-
-def confusion_matrix_of_site_satellite_resolution(
-    test_uav_file,
-    uav_labels_file,
-    prediction_file,
-    satellite_classes,
-    satellite_from_uav_classes,
-    uav_classes_to_ignore,
-    polygon_file,
-    method_2_threshold,
-):
-    '''Confusion matrix but coarsening the UAV imagry to the resolution of the satellite image and taking the mode'''
-    debug=False
-    # Exit if the plots have already been created.
-    overall_plot_filename = prediction_file.with_name(
-            f"{prediction_file.stem}_confusion_matrix_{sentinel2.S2_RESOLUTION}_resolution_time_all_dates.png"
-        )
-    if overall_plot_filename.exists():
-        print(f"{overall_plot_filename.name} already exists."
-              "Skipping. Delete plots if you want them regenerated.")
-        return
-
-    print("Match UAV resolution to Satellite then compare predictions to UAV")
-
-    uav_training_data_reclassed, sat_prediction_data = load_truth_and_predictions(
-        test_uav_file=test_uav_file,
-        uav_labels_file=uav_labels_file,
-        prediction_file=prediction_file,
-        satellite_classes=satellite_classes,
-        satellite_from_uav_classes=satellite_from_uav_classes,
-        uav_classes_to_ignore=uav_classes_to_ignore,
-        polygon_file=polygon_file,
-        match_satellite_resolution=True,
-    )
-
-    # Pull out the predictions vs ground truth
-    print("\tLoad UAV image")
-    all_truth = []
-    all_predictions = []
-    for time_index in range(len(sat_prediction_data["time"])):
-
-        plot_filename = prediction_file.with_name(
-            f"{prediction_file.stem}_confusion_matrix_{sentinel2.S2_RESOLUTION}_resolution_time_{time_index}.png"
-        )
-
-        print(f"\tConstruct confusion matrix for time index: {time_index}")
-        truth, predictions = extract_truth_and_predictions(
-            uav_training_data_reclassed=uav_training_data_reclassed,
-            sat_prediction_data=sat_prediction_data,
-            time_index=time_index,
-        )
-
-        all_truth.append(truth)
-        all_predictions.append(predictions)
-
-        if debug:
-            if plot_filename.exists():
-                print(f"{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
-                continue
-            plot_confusion_matrix(truth=truth,
-                                  predictions=predictions,
-                                  class_names=satellite_classes,
-                                  plot_filename=plot_filename,
-                                  title=f"{int(method_2_threshold*100)}% Sampling Purity; Time index: {time_index}",
-                                  )
-
-    # Force free memory
-    del uav_training_data_reclassed
-    del sat_prediction_data
-    gc.collect()
-
-    print("\tOverall confusion matrix across prediction dates")
-    all_truth = numpy.concatenate(all_truth)
-    all_predictions = numpy.concatenate(all_predictions)
-    plot_confusion_matrix(truth=all_truth,
-                          predictions=all_predictions,
-                          class_names=satellite_classes,
-                          plot_filename=overall_plot_filename,
-                          title= f"{int(method_2_threshold*100)}% Sampling Purity",
-    )
-
-    return all_truth, all_predictions
