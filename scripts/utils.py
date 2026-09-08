@@ -114,16 +114,12 @@ def create_data_folders():
 
     (data_path / "training").mkdir(exist_ok=True, parents=True)
 
-    (data_path / "models").mkdir(exist_ok=True,
-                                                      parents=True)
+    (data_path / "models").mkdir(exist_ok=True, parents=True)
 
-    (data_path / "validation" / "predictions").mkdir(exist_ok=True,
-                                                     parents=True)
+    (data_path / "validation").mkdir(exist_ok=True, parents=True)
 
     (data_path / "predictions" / "satellite_images").mkdir(exist_ok=True,
                                                            parents=True)
-    (data_path / "predictions" / "predictions").mkdir(exist_ok=True,
-                                                      parents=True)
 
 
 def write_netcdf_conventions_in_place(data):

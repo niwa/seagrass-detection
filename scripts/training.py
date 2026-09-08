@@ -218,21 +218,39 @@ def map_satellite_ids_into_samples(
     return samples_dataframe
 
 
+def time_index_for_date(data, date: str) -> int:
+    """Return the index of the time step matching the given date (e.g. "2025-04-27")."""
+
+    # Match on the calendar day as times include a time of day. Use the xarray dt
+    # accessor as times may be cftime rather than datetime64.
+    dates = data["time"].dt.strftime("%Y-%m-%d").values
+    matching_indices = numpy.flatnonzero(
+        dates == pandas.to_datetime(date).strftime("%Y-%m-%d")
+    )
+    if len(matching_indices) == 0:
+        raise ValueError(f"No image for date {date}. Available dates: {list(dates)}.")
+
+    return int(matching_indices[0])
+
+
 def predict_site_for_date(
     test_satellite_file: pathlib.Path,
     polygon_file: pathlib.Path,
     model_file: pathlib.Path,
     model_feature_names_file: pathlib.Path,
-    time_index: int,
+    date: str,
 ):
-    """Predict classes for one satellite image. Load feature names to ensure the same order."""
+    """Predict classes for the satellite image on the given date (e.g. "2025-04-27").
+    Load feature names to ensure the same order."""
 
     satellite_data = utils.load_satellite(filename=test_satellite_file)
     uav_polygon = geopandas.read_file(polygon_file)
     model = joblib.load(model_file)
     model_columns = pandas.read_csv(model_feature_names_file)
 
-    print(f"\tPredict satellite image at time index {time_index}")
+    time_index = time_index_for_date(data=satellite_data, date=date)
+
+    print(f"\tPredict satellite image for date {date}")
     observations_to_predict = (
         satellite_data.isel(time=time_index)[model_columns.columns]
         .to_array()
@@ -274,15 +292,16 @@ def predict_site(
 
     satellite_data = utils.load_satellite(filename=test_satellite_file)
     predictions = []
-    print(f"\tPredict for {len(satellite_data['time'])} satellite images")
-    for time_index in range(len(satellite_data["time"])):
+    satellite_dates = satellite_data["time"].dt.strftime("%Y-%m-%d").values
+    print(f"\tPredict for {len(satellite_dates)} satellite images")
+    for date in satellite_dates:
         predictions.append(
             predict_site_for_date(
                 test_satellite_file=test_satellite_file,
                 polygon_file=polygon_file,
                 model_file=model_file,
                 model_feature_names_file=model_feature_names_file,
-                time_index=time_index,
+                date=date,
             )
         )
 
@@ -293,7 +312,7 @@ def predict_site(
     return predictions, satellite_data
 
 
-def confusion_matrix_of_site(
+def load_truth_and_predictions(
     test_uav_file,
     uav_labels_file,
     prediction_file,
@@ -301,27 +320,18 @@ def confusion_matrix_of_site(
     satellite_from_uav_classes,
     uav_classes_to_ignore,
     polygon_file,
-    method_2_threshold,
+    match_satellite_resolution: bool,
 ):
+    """Load the UAV classification and satellite predictions, map the UAV classes to
+    the satellite classes, clip both to the polygon and align them onto a common grid.
+    If match_satellite_resolution the UAV data is coarsened to the satellite resolution
+    taking the mode, otherwise the predictions are reindexed onto the UAV grid."""
 
-    debug=False
-
-    # Exit if the plots have already been created.
-    overall_plot_filename = prediction_file.with_name(
-            f"{prediction_file.stem}_confusion_matrix_time_all_dates.png"
-        )
-    if overall_plot_filename.exists():
-        print(f"{overall_plot_filename.name} already exists."
-              "Skipping. Delete plots if you want them regenerated.")
-        return
-    
     uav_training_labels = (
         pandas.read_csv(uav_labels_file, sep="\t", header=None, names=["Value", "Key"])
         .set_index("Key")["Value"]
         .to_dict()
     )
-
-    print("Match satellite resolution to UAV then compare predictions to UAV")
 
     # Load in images
     # UAV classification is int8 (~1.1 GB) so load without dask chunks: all
@@ -361,9 +371,145 @@ def confusion_matrix_of_site(
         uav_polygon.geometry, all_touched=True, drop=True
     )
 
-    # reindex to match training data
+    if match_satellite_resolution:
+        # Align UAV to satellite then coarsen taking the mode
+        uav_training_data_reclassed, upsample_rate = sampling.align_fine_grid_to_coarse_grid(
+            fine_grid=uav_training_data_reclassed, coarse_grid=sat_prediction_data)
+
+        def get_mode(array, axis):
+            """returns the mode values only; ignore counts"""
+            return scipy.stats.mode(array, axis=axis).mode
+        uav_training_data_reclassed = uav_training_data_reclassed.coarsen(
+                x=upsample_rate, y=upsample_rate, boundary="trim"
+                ).reduce(get_mode)
+
+    # reindex to match the UAV data - also ensures even x & y spacing
     sat_prediction_data = sat_prediction_data.reindex_like(
         uav_training_data_reclassed, method="nearest"
+    )
+
+    return uav_training_data_reclassed, sat_prediction_data
+
+
+def extract_truth_and_predictions(
+    uav_training_data_reclassed,
+    sat_prediction_data,
+    time_index: int,
+):
+    """Return the matched UAV truth and satellite prediction values for one time index."""
+
+    # Compute mask to a numpy array before using it so it is not
+    # recomputed twice (once for truth, once for predictions) and so
+    # that it does not trigger a concurrent dask computation alongside
+    # uav_training_data_reclassed.values.
+    mask = sat_prediction_data.isel(time=time_index).notnull().values
+    truth = uav_training_data_reclassed.values[mask]
+    predictions = sat_prediction_data.isel(time=time_index).values[mask]
+    del mask
+    gc.collect()
+
+    # drop any NaN interpolated from clipped areas in the prediction
+    mask = (
+        ~numpy.isnan(predictions)
+        & ~numpy.isnan(truth)
+        & (truth != utils.UAV_NAN_CLASS)
+    )
+
+    return truth[mask], predictions[mask]
+
+
+def confusion_matrix_of_site_for_date(
+    test_uav_file,
+    uav_labels_file,
+    prediction_file,
+    satellite_classes,
+    satellite_from_uav_classes,
+    uav_classes_to_ignore,
+    polygon_file,
+    method_2_threshold,
+    date,
+    match_satellite_resolution=False,
+):
+    """Confusion matrix for the predictions on a single date (e.g. "2025-04-27")."""
+
+    resolution_label = (
+        f"_{sentinel2.S2_RESOLUTION}_resolution" if match_satellite_resolution else ""
+    )
+    plot_filename = prediction_file.with_name(
+        f"{prediction_file.stem}_confusion_matrix{resolution_label}_date_{date}.png"
+    )
+    if plot_filename.exists():
+        print(f"{plot_filename.name} already exists."
+              "Skipping. Delete plots if you want them regenerated.")
+        return
+
+    uav_training_data_reclassed, sat_prediction_data = load_truth_and_predictions(
+        test_uav_file=test_uav_file,
+        uav_labels_file=uav_labels_file,
+        prediction_file=prediction_file,
+        satellite_classes=satellite_classes,
+        satellite_from_uav_classes=satellite_from_uav_classes,
+        uav_classes_to_ignore=uav_classes_to_ignore,
+        polygon_file=polygon_file,
+        match_satellite_resolution=match_satellite_resolution,
+    )
+
+    print(f"\tExtract truth and predictions for date: {date}")
+    truth, predictions = extract_truth_and_predictions(
+        uav_training_data_reclassed=uav_training_data_reclassed,
+        sat_prediction_data=sat_prediction_data,
+        time_index=time_index_for_date(data=sat_prediction_data, date=date),
+    )
+
+    # Force free memory
+    del uav_training_data_reclassed
+    del sat_prediction_data
+    gc.collect()
+
+    plot_confusion_matrix(truth=truth,
+                          predictions=predictions,
+                          class_names=satellite_classes,
+                          plot_filename=plot_filename,
+                          title=f"{int(method_2_threshold*100)}% Sampling Purity; {date}",
+    )
+    matplotlib.pyplot.close()
+
+    return truth, predictions
+
+
+def confusion_matrix_of_site(
+    test_uav_file,
+    uav_labels_file,
+    prediction_file,
+    satellite_classes,
+    satellite_from_uav_classes,
+    uav_classes_to_ignore,
+    polygon_file,
+    method_2_threshold,
+):
+
+    debug=False
+
+    # Exit if the plots have already been created.
+    overall_plot_filename = prediction_file.with_name(
+            f"{prediction_file.stem}_confusion_matrix_time_all_dates.png"
+        )
+    if overall_plot_filename.exists():
+        print(f"{overall_plot_filename.name} already exists."
+              "Skipping. Delete plots if you want them regenerated.")
+        return
+
+    print("Match satellite resolution to UAV then compare predictions to UAV")
+
+    uav_training_data_reclassed, sat_prediction_data = load_truth_and_predictions(
+        test_uav_file=test_uav_file,
+        uav_labels_file=uav_labels_file,
+        prediction_file=prediction_file,
+        satellite_classes=satellite_classes,
+        satellite_from_uav_classes=satellite_from_uav_classes,
+        uav_classes_to_ignore=uav_classes_to_ignore,
+        polygon_file=polygon_file,
+        match_satellite_resolution=False,
     )
 
     # Pull out the predictions vs ground truth
@@ -376,24 +522,11 @@ def confusion_matrix_of_site(
         )
 
         print(f"\tExtract truth and predictions time index: {time_index}")
-        # Compute mask to a numpy array before using it so it is not
-        # recomputed twice (once for truth, once for predictions) and so
-        # that it does not trigger a concurrent dask computation alongside
-        # uav_training_data_reclassed.values.
-        mask = sat_prediction_data.isel(time=time_index).notnull().values
-        truth = uav_training_data_reclassed.values[mask]
-        predictions = sat_prediction_data.isel(time=time_index).values[mask]
-        del mask
-        gc.collect()
-
-        # drop any NaN interpolated from clipped areas in the prediction
-        mask = (
-            ~numpy.isnan(predictions)
-            & ~numpy.isnan(truth)
-            & (truth != utils.UAV_NAN_CLASS)
+        truth, predictions = extract_truth_and_predictions(
+            uav_training_data_reclassed=uav_training_data_reclassed,
+            sat_prediction_data=sat_prediction_data,
+            time_index=time_index,
         )
-        truth = truth[mask]
-        predictions = predictions[mask]
         all_truth.append(truth)
         all_predictions.append(predictions)
 
@@ -439,8 +572,8 @@ def confusion_matrix_of_pixels(
         truth=predictions["satellite_class_id"],
         predictions=predictions["predicted_class_id"],
         class_names=satellite_classes,
-        plot_filename=overall_plot_filename,
-        title=overall_plot_title,
+        plot_filename=plot_filename,
+        title=plot_title,
         )
 
 
@@ -585,66 +718,17 @@ def confusion_matrix_of_site_satellite_resolution(
               "Skipping. Delete plots if you want them regenerated.")
         return
 
-    uav_training_labels = (
-        pandas.read_csv(uav_labels_file, sep="\t", header=None, names=["Value", "Key"])
-        .set_index("Key")["Value"]
-        .to_dict()
-    )
-
     print("Match UAV resolution to Satellite then compare predictions to UAV")
 
-    # Load in images
-    # UAV classification is int8 (~1.1 GB) so load without dask chunks: all
-    # subsequent .where() and rio.clip() operations then run eagerly in the
-    # main process rather than building a lazy graph that dask workers must
-    # compute simultaneously (which can multiply peak memory 4–8x).
-    uav_training_data = utils.load_classification(filename=test_uav_file, chunks=None, masked=False)
-    sat_prediction_data = utils.load_classification(filename=prediction_file, chunks=True, masked=False)
-    uav_polygon = geopandas.read_file(polygon_file)
-
-    # drop classes to ignore
-    uav_training_data_reclassed = uav_training_data.where(
-        ~uav_training_data.isin(
-            [uav_training_labels[key] for key in uav_classes_to_ignore]
-        ),
-        utils.UAV_NAN_CLASS,
-    )
-
-    # convert UAV to satellite classifications
-    for key in satellite_from_uav_classes.keys():
-        class_ids_to_map = [
-            uav_training_labels[key] for key in satellite_from_uav_classes[key]
-        ]
-        uav_training_data_reclassed = uav_training_data_reclassed.where(
-            ~uav_training_data.isin(class_ids_to_map), satellite_classes[key]
-        )
-
-    # Force free memory
-    del uav_training_data
-    gc.collect()
-
-    # Clip both to polygon
-    uav_training_data_reclassed = uav_training_data_reclassed.rio.clip(
-        uav_polygon.geometry, all_touched=True, drop=True
-    )
-    sat_prediction_data = sat_prediction_data.rio.clip(
-        uav_polygon.geometry, all_touched=True, drop=True
-    )
-
-    #uav_training_data_reclassed.load()
-    uav_training_data_reclassed, upsample_rate = sampling.align_fine_grid_to_coarse_grid(
-        fine_grid=uav_training_data_reclassed, coarse_grid=sat_prediction_data)
-
-        # Align UAV to satellite then coarsen taking the mode
-    def get_mode(array, axis):
-        """returns the mode values only; ignore counts"""
-        return scipy.stats.mode(array, axis=axis).mode
-    uav_training_data_reclassed = uav_training_data_reclassed.coarsen(
-            x=upsample_rate, y=upsample_rate, boundary="trim"
-            ).reduce(get_mode)
-    # Ensure exactly even spacing of the satellite imagry in x & y
-    sat_prediction_data = sat_prediction_data.reindex_like(
-        uav_training_data_reclassed, method="nearest"
+    uav_training_data_reclassed, sat_prediction_data = load_truth_and_predictions(
+        test_uav_file=test_uav_file,
+        uav_labels_file=uav_labels_file,
+        prediction_file=prediction_file,
+        satellite_classes=satellite_classes,
+        satellite_from_uav_classes=satellite_from_uav_classes,
+        uav_classes_to_ignore=uav_classes_to_ignore,
+        polygon_file=polygon_file,
+        match_satellite_resolution=True,
     )
 
     # Pull out the predictions vs ground truth
@@ -658,24 +742,11 @@ def confusion_matrix_of_site_satellite_resolution(
         )
 
         print(f"\tConstruct confusion matrix for time index: {time_index}")
-        # Compute mask to a numpy array before using it so it is not
-        # recomputed twice (once for truth, once for predictions) and so
-        # that it does not trigger a concurrent dask computation alongside
-        # uav_training_data_reclassed.values.
-        mask = sat_prediction_data.isel(time=time_index).notnull().values
-        truth = uav_training_data_reclassed.values[mask]
-        predictions = sat_prediction_data.isel(time=time_index).values[mask]
-        del mask
-        gc.collect()
-
-        # drop any NaN interpolated from clipped areas in the prediction
-        mask = (
-            ~numpy.isnan(predictions)
-            & ~numpy.isnan(truth)
-            & (truth != utils.UAV_NAN_CLASS)
+        truth, predictions = extract_truth_and_predictions(
+            uav_training_data_reclassed=uav_training_data_reclassed,
+            sat_prediction_data=sat_prediction_data,
+            time_index=time_index,
         )
-        truth = truth[mask]
-        predictions = predictions[mask]
 
         all_truth.append(truth)
         all_predictions.append(predictions)
