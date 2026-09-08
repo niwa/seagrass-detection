@@ -101,6 +101,16 @@ def get_validation_path(sample_method: str, method_2_threshold: float, low_tide_
     validation_path.mkdir(exist_ok=True, parents=True)
     return validation_path
 
+def get_prediction_path(sample_method: str, method_2_threshold: float, low_tide_delta: int, max_cloud_cover: int):
+    """Get the path to the sample folder for a given sampling method."""
+
+    sample_folder = get_samples_folder(sample_method, method_2_threshold)
+
+    data_path = get_data_path()
+    prediction_path = data_path / "predictions" /  f"low_tide_delta_{low_tide_delta}_max_cloud_percentage_{max_cloud_cover}" / sample_folder
+    prediction_path.mkdir(exist_ok=True, parents=True)
+    return prediction_path
+
 
 def create_data_folders():
     """Create output folders for satellite, training,
@@ -243,3 +253,26 @@ def mask_to_polygons(mask_dataframe, coarsen_ratio: int = None):
         geometry=polygons, crs=mask_dataframe.rio.crs
     )
     return polygon_dataframe
+
+
+def rgb_from_satellite(satellite_data_path):
+    """Save out an RGB for each date in a nested 'rgb' folder"""
+
+    satellite_data = load_satellite(filename=satellite_data_path)
+    rgb_folder = satellite_data_path.parent / "rgb"
+    rgb_folder.mkdir(exist_ok=True)
+    for time_index in range(satellite_data.sizes["time"]):
+        rgb = satellite_data[["B04", "B03", "B02"]].isel(time=time_index).to_array("band")
+        date = str(satellite_data.time.isel(time=time_index).values)[:10]
+
+        # Sentinel-2 reflectance is scaled to 0-10000; create an 8-bit display RGB.
+        rgb = ((rgb.fillna(0).clip(min=0, max=3000) / 3000 * 255)
+               .round()
+               .astype("uint8")
+               .rio.write_nodata(0))
+        rgb.rio.to_raster(
+            rgb_folder / f"{satellite_data_path.stem}_{date}.tif",
+            dtype="uint8",
+            photometric="RGB",
+            compress="ZSTD",
+        )

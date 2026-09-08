@@ -312,6 +312,26 @@ def predict_site(
     return predictions, satellite_data
 
 
+def predict_samples(
+    test_dataframe: pandas.DataFrame,
+    model_file: pathlib.Path,
+    model_feature_names_file: pathlib.Path,
+):
+    """Predict classes for each row of a samples dataframe. Load feature names to
+    ensure the same order. Returns a copy with a "predicted_class_id" column."""
+
+    model = joblib.load(model_file)
+    model_columns = pandas.read_csv(model_feature_names_file)
+
+    print(f"\tPredict {len(test_dataframe)} samples")
+    test_dataframe = test_dataframe.copy()
+    test_dataframe["predicted_class_id"] = model.predict(
+        test_dataframe[model_columns.columns]
+    )
+
+    return test_dataframe
+
+
 def load_truth_and_predictions(
     test_uav_file,
     uav_labels_file,
@@ -472,7 +492,6 @@ def confusion_matrix_of_site_for_date(
                           plot_filename=plot_filename,
                           title=f"{int(method_2_threshold*100)}% Sampling Purity; {date}",
     )
-    matplotlib.pyplot.close()
 
     return truth, predictions
 
