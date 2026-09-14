@@ -267,6 +267,7 @@ class UNetClassifier(pytorch_lightning.LightningModule):
 def train_unet_classifier(
     tiles: numpy.ndarray,
     labels: numpy.ndarray,
+    models_path: pathlib.Path,
     num_classes: int,
     epochs: int = 20,
     batch_size: int = 8,
@@ -297,7 +298,15 @@ def train_unet_classifier(
         learning_rate=learning_rate,
     )
 
-    trainer = pytorch_lightning.Trainer(max_epochs=epochs, logger=False, enable_checkpointing=False)
+    checkpoint_callback = pytorch_lightning.callbacks.ModelCheckpoint(
+        dirpath=models_path,
+        filename="unet-{epoch:02d}-{train_loss:.4f}",
+        monitor="train_loss",
+        mode="min",
+        save_top_k=1,
+        save_last=True,
+    )
+    trainer = pytorch_lightning.Trainer(max_epochs=epochs, callbacks=[checkpoint_callback])
     trainer.fit(model, train_dataloaders=data_loader) # fit method can pass a checkpoint
 
     return model
@@ -313,6 +322,10 @@ def load_samples(
     samples_dataframe = []
     for training_site in training_sites:
         samples_file = samples_path / f"{training_site}_training_data.csv"
+        if not samples_file.exists():
+            print(f"\tWARNING - no training data for site {training_site}. Skipping this site."
+                  "Rerun `extract_training_data` for this site if data is expected.")
+            continue
         samples_dataframe.append(pandas.read_csv(samples_file))
     samples_dataframe = pandas.concat(samples_dataframe, ignore_index=True)
 
@@ -521,6 +534,103 @@ def predict_site(
 
     print("\tCombine predictions and write conventions")
     predictions = xarray.concat(predictions, dim="time")
+    utils.write_netcdf_conventions_in_place(predictions)
+
+    return predictions, satellite_data
+
+
+def predict_site_unet(
+    test_satellite_file: pathlib.Path,
+    polygon_file: pathlib.Path,
+    checkpoint_file: pathlib.Path,
+    tile_size: int = 128,
+    stride: int = 64,
+):
+    """Predict classes for satellite images across all time steps using a trained U-Net
+    checkpoint. Tiles the satellite imagery for inference; overlapping tiles (stride <
+    tile_size) have their softmax probabilities averaged before taking the final class,
+    which reduces blockiness at tile boundaries. Returns predictions and satellite data
+    as xarray DataArrays."""
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\tLoading U-Net checkpoint from {checkpoint_file}")
+    model = UNetClassifier.load_from_checkpoint(checkpoint_file)
+    model = model.to(device)
+    model.eval()
+
+    satellite_data = utils.load_satellite(filename=test_satellite_file, chunks=None)
+    uav_polygon = geopandas.read_file(polygon_file)
+
+    num_classes = model.hparams.num_classes
+    predictions_list = []
+    satellite_dates = satellite_data["time"].dt.strftime("%Y-%m-%d").values
+    print(f"\tPredict for {len(satellite_dates)} satellite images")
+
+    for time_index in range(len(satellite_data["time"])):
+        # Select a fixed, ordered set of bands
+        image = satellite_data[sentinel2.BANDS].isel(time=time_index).to_array().values
+        height, width = image.shape[1], image.shape[2]
+
+        # Accumulate class probabilities across overlapping tiles, then average
+        probability_sums = numpy.zeros((num_classes, height, width), dtype=numpy.float32)
+        overlap_counts = numpy.zeros((height, width), dtype=numpy.float32)
+
+        for y in range(0, height, stride):
+            for x in range(0, width, stride):
+                # Extract and pad tile
+                image_slice = image[:, y:y + tile_size, x:x + tile_size]
+
+                image_tile = numpy.full(
+                    (image.shape[0], tile_size, tile_size),
+                    numpy.nan,
+                    dtype=numpy.float32,
+                )
+                slice_height, slice_width = image_slice.shape[1], image_slice.shape[2]
+                image_tile[:, :slice_height, :slice_width] = image_slice
+
+                # Convert to tensor and predict
+                with torch.no_grad():
+                    tile_tensor = torch.as_tensor(
+                        image_tile[numpy.newaxis, ...], dtype=torch.float32, device=device
+                    )
+                    logits = model(tile_tensor)  # (1, num_classes, tile_size, tile_size)
+                    tile_probabilities = (
+                        torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+                    )
+
+                # Accumulate probabilities for the valid (non-padded) region only
+                probability_sums[:, y:y + slice_height, x:x + slice_width] += (
+                    tile_probabilities[:, :slice_height, :slice_width]
+                )
+                overlap_counts[y:y + slice_height, x:x + slice_width] += 1
+
+        # Ensure all pixels were predicted (sanity check)
+        if (overlap_counts == 0).any():
+            print(f"\t\tWarning: some pixels were not predicted for time index {time_index}")
+
+        # Average overlapping probabilities then take the most likely class
+        mean_probabilities = probability_sums / numpy.maximum(overlap_counts, 1)
+        predictions = numpy.argmax(mean_probabilities, axis=0).astype(utils.CLASSIFICATION_DTYPE)
+
+        # Convert to DataArray and clip to polygon
+        predictions_da = xarray.DataArray(
+            [predictions],
+            coords={
+                "time": numpy.atleast_1d(satellite_data["time"][time_index]),
+                "y": satellite_data.y,
+                "x": satellite_data.x,
+            },
+            dims=["time", "y", "x"],
+        )
+        predictions_da.rio.write_crs(input_crs=utils.CRS_NZTM, inplace=True)
+        predictions_da = predictions_da.rio.clip(
+            uav_polygon.geometry, all_touched=True, drop=True
+        )
+
+        predictions_list.append(predictions_da)
+
+    print("\tCombine predictions and write conventions")
+    predictions = xarray.concat(predictions_list, dim="time")
     utils.write_netcdf_conventions_in_place(predictions)
 
     return predictions, satellite_data

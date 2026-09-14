@@ -54,8 +54,8 @@ def extract_training_spectra_from_satellite_given_training_class(
 
     if int(mask_coarse.sum()) == 0:
         training_spectrum = pandas.DataFrame(
-                    columns=list(satellite_data.isel(time=0).data_vars) + ['x','y','uav_class_id']
-                )
+            columns=list(satellite.data_vars) + ["x", "y", "uav_class_id"]
+        )
         return training_spectrum
 
     # 2. Remove unwanted SCL from class mask before sampling satellite.
@@ -63,7 +63,9 @@ def extract_training_spectra_from_satellite_given_training_class(
     mask_coarse = mask_coarse.where(~scl_mask, False)
 
     if int(mask_coarse.sum()) == 0:
-        return pandas.DataFrame({key: [] for key in satellite.data_vars})
+        return pandas.DataFrame(
+            columns=list(satellite.data_vars) + ["x", "y", "uav_class_id"]
+        )
 
     # 3. Extract x and y only where to class values
     indicies_xy = numpy.argwhere(numpy.array(mask_coarse))
@@ -328,8 +330,8 @@ def sample_site(
     # load classified UAV - ensure is to nztm
     uav_file = uav_folder / f"{site_name}_classified.tif"
     if not uav_file.exists():
-        print("\tWARNING - no classified image")
-        raise ValueError(f"Missing classified image for site {site_name}")
+        raise ValueError("\tWARNING - no classified image"
+                         f" for site {site_name}. Skipping this site.")
     else:
         uav_data = utils.load_classification(
             filename=uav_file,
@@ -341,9 +343,10 @@ def sample_site(
                                               low_tide_delta_mins=low_tide_delta_mins,
                                               max_cloud_cover=max_cloud_cover)
     if not satellite_file.exists():
-        raise ValueError(
-            f"Missing satellite image for site {site_name}. Try running `get_site_satellite` first. "
-             f"satellite_file: {satellite_file}")
+        print(f"\tWARNING - satellite image for site {site_name} - either it's not yet downloaded or"
+              " there is no suitable low cloud / low tide satellite image. Ignoring this site."
+              " Try running `get_site_satellite` first if you expect a satellite image.")
+        return pandas.DataFrame(columns=["x", "y", "uav_class_id"])
     satellite_data = utils.load_satellite(filename=satellite_file)
 
     # Extract training dataset
