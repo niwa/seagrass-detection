@@ -177,6 +177,52 @@ def training_data_from_images_method_2(satellite_data, uav_data, labels,
     return training_spectrum
 
 
+def uav_class_raster_from_images_method_2(satellite_data, uav_data, labels, threshold):
+    """Build a per-pixel UAV class raster on the satellite grid, using the same
+    coarsen-and-threshold approach as training_data_from_images_method_2. Cells where
+    no class reaches the threshold are left as NaN. Returns a DataArray named
+    "uav_class_id"."""
+
+    # Align UAV to satellite data but at finer resolution
+    uav_data, upsample_rate = align_fine_grid_to_coarse_grid(
+        fine_grid=uav_data, coarse_grid=satellite_data)
+
+    # Ensure exactly the same values for the satellite coordinates
+    # - as observed e-10 differences in coordinate value spacing
+    satellite_data = satellite_data.reindex_like(
+            uav_data.coarsen(
+                x=upsample_rate, y=upsample_rate, boundary="trim"
+                ).count(),
+            method="nearest",
+        )
+
+    class_raster = xarray.full_like(
+        uav_data.coarsen(x=upsample_rate, y=upsample_rate, boundary="trim").count(),
+        fill_value=numpy.nan,
+        dtype="float32",
+    )
+
+    for class_key in labels.keys():
+        print(f"\tClass {class_key}")
+
+        # mask to label
+        mask_fine = uav_data == labels[class_key]
+
+        # coarsen mask and get mean - can then threshold 1 = all, .9 = 90%
+        mask_coarse = mask_fine.coarsen(
+            x=upsample_rate, y=upsample_rate, boundary="trim"
+        ).mean()
+
+        # mask from coarsened mask at thresold
+        mask_coarse = mask_coarse >= threshold
+
+        class_raster = class_raster.where(~mask_coarse, labels[class_key])
+
+    class_raster = class_raster.rename("uav_class_id")
+    class_raster.rio.write_crs(uav_data.rio.crs, inplace=True)
+    return class_raster
+
+
 def training_data_from_images_method_1(satellite_data, uav_data, labels):
     """Extract training data from the images across the labels and
     return a pandas DataFrame - doesn't require 100% to be of that class"""
@@ -205,7 +251,8 @@ def get_site_satellite(
     site_name: str,
     survey_dates_file: pathlib.Path,
     lowtide_search_range: int,
-    low_tide_delta: int,
+    low_tide_delta_hrs: int,
+    low_tide_delta_mins: int,
     uav_folder: pathlib.Path,
     max_cloud_cover: float,
 ):
@@ -213,7 +260,8 @@ def get_site_satellite(
 
     print(f"Site {site_name}")
     uav_file = uav_folder / f"{site_name}_classified.tif"
-    satellite_file = utils.get_satellite_path(site_name=site_name, low_tide_delta=low_tide_delta, max_cloud_cover=max_cloud_cover)
+    satellite_file = utils.get_satellite_path(site_name=site_name, low_tide_delta_hrs=low_tide_delta_hrs,
+                                              low_tide_delta_mins=low_tide_delta_mins, max_cloud_cover=max_cloud_cover)
     if satellite_file.exists():
         print("\tSatellite file already exists")
         return
@@ -247,7 +295,8 @@ def get_site_satellite(
         max_cloud_cover=max_cloud_cover,
         date_file=survey_dates_file,
         low_tide_search_days=lowtide_search_range,
-        low_tide_delta=low_tide_delta,
+        low_tide_delta_hrs=low_tide_delta_hrs,
+        low_tide_delta_mins=low_tide_delta_mins,
     )
     if len(satellite_data['time']) == 0:
         print("Warning: No satellite data without cloud. Ignore")
@@ -264,7 +313,8 @@ def sample_site(
     training_labels_file: pathlib.Path,
     uav_folder: pathlib.Path,
     max_cloud_cover: int,
-    low_tide_delta: int,
+    low_tide_delta_hrs: int,
+    low_tide_delta_mins: int,
     sample_method: str,
     method_2_threshold: float = None,
 ):
@@ -287,7 +337,9 @@ def sample_site(
         )
 
     # get or load low tide satellite with no cloud
-    satellite_file = utils.get_satellite_path(site_name=site_name, low_tide_delta=low_tide_delta, max_cloud_cover=max_cloud_cover)
+    satellite_file = utils.get_satellite_path(site_name=site_name, low_tide_delta_hrs=low_tide_delta_hrs,
+                                              low_tide_delta_mins=low_tide_delta_mins,
+                                              max_cloud_cover=max_cloud_cover)
     if not satellite_file.exists():
         raise ValueError(
             f"Missing satellite image for site {site_name}. Try running `get_site_satellite` first. "
@@ -297,7 +349,8 @@ def sample_site(
     # Extract training dataset
     training_file = utils.get_training_data_path(
         site_name=site_name, sample_method=sample_method, method_2_threshold=method_2_threshold,
-        low_tide_delta=low_tide_delta, max_cloud_cover=max_cloud_cover
+        low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
+        max_cloud_cover=max_cloud_cover
     )
     if not training_file.exists():
         print("Construct training data from UAV and Satellite imagery")
@@ -334,6 +387,66 @@ def sample_site(
     summary = summary[["uav_class_name", "count"]]
     summary.to_csv(training_file.with_stem(f"{training_file.stem}_summary"))
     summary
+
+
+def sample_site_uav_raster(
+    site_name: str,
+    training_labels_file: pathlib.Path,
+    uav_folder: pathlib.Path,
+    max_cloud_cover: int,
+    low_tide_delta_hrs: int,
+    low_tide_delta_mins: int,
+    method_2_threshold: float,
+):
+    """Given a site, build the UAV class raster (see uav_class_raster_from_images_method_2)
+    on the satellite grid and save as a netcdf with variable "uav_class_id", NaN where
+    the threshold is not reached."""
+
+    print(f"Site {site_name}")
+    training_labels = pandas.read_csv(
+        training_labels_file, sep="\t", header=None, names=["Value", "Key"]
+    ).set_index('Key')['Value'].to_dict()
+
+    # load classified UAV - ensure is to nztm
+    uav_file = uav_folder / f"{site_name}_classified.tif"
+    if not uav_file.exists():
+        print("\tWARNING - no classified image")
+        raise ValueError(f"Missing classified image for site {site_name}")
+    else:
+        uav_data = utils.load_classification(
+            filename=uav_file,
+            chunks=True
+        )
+
+    # get low tide satellite with no cloud
+    satellite_file = utils.get_satellite_path(site_name=site_name, low_tide_delta_hrs=low_tide_delta_hrs,
+                                              low_tide_delta_mins=low_tide_delta_mins, max_cloud_cover=max_cloud_cover)
+    if not satellite_file.exists():
+        raise ValueError(
+            f"Missing satellite image for site {site_name}. Try running `get_site_satellite` first. "
+             f"satellite_file: {satellite_file}")
+    satellite_data = utils.load_satellite(filename=satellite_file)
+
+    # Build and save the UAV class raster
+    raster_file = utils.get_training_data_path(
+        site_name=site_name, sample_method="sampling_2", method_2_threshold=method_2_threshold,
+        low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
+        max_cloud_cover=max_cloud_cover
+    ).with_suffix(".nc")
+    if raster_file.exists():
+        print(f"\t{raster_file.name} already exists. Skipping. Delete if you want it regenerated.")
+        return
+
+    print("Construct UAV class raster from UAV and Satellite imagery")
+    raster_file.parent.mkdir(exist_ok=True)
+    uav_class_raster = uav_class_raster_from_images_method_2(
+        satellite_data=satellite_data,
+        uav_data=uav_data,
+        labels=training_labels,
+        threshold=method_2_threshold,
+    )
+    utils.write_netcdf_conventions_in_place(uav_class_raster)
+    utils.save_netcdf(uav_class_raster.to_dataset(), raster_file)
 
 
 def get_satellite_sample_site(
@@ -440,10 +553,11 @@ def get_satellite_sample_site(
     summary
 
 def site_sample_counts_by_class(sample_method: str, method_2_threshold: float,
-                                max_cloud_cover: int, low_tide_delta: int):
+                                max_cloud_cover: int, low_tide_delta_hrs: int, low_tide_delta_mins: int):
     """Summarise the number of samples for each class for each site and save to csv."""
     samples_folder_path = utils.get_samples_path(sample_method, method_2_threshold,
-                                                 max_cloud_cover=max_cloud_cover, low_tide_delta=low_tide_delta)
+                                                 max_cloud_cover=max_cloud_cover,
+                                                 low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins)
     counts_summary = []
     site_names = []
     for site_summary_file in samples_folder_path.glob("*_training_data_summary.csv"):
@@ -454,5 +568,6 @@ def site_sample_counts_by_class(sample_method: str, method_2_threshold: float,
         level=0, names="Site")[["Site","uav_class_name", "count"]].pivot(index="Site", columns="uav_class_name",values="count")
     counts_summary = counts_summary.fillna(0)
     counts_summary.to_csv(utils.get_samples_summary_file_path(sample_method, method_2_threshold,
-                                                              max_cloud_cover=max_cloud_cover, low_tide_delta=low_tide_delta))
+                                                              max_cloud_cover=max_cloud_cover,
+                                                              low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins))
     return counts_summary

@@ -15,6 +15,9 @@ import joblib
 import numpy
 import pathlib
 import matplotlib.pyplot
+import torch
+import diffusers
+import pytorch_lightning
 
 
 def get_training_data_across_sites(
@@ -128,6 +131,178 @@ def train_random_forest_classifier(
     return model, model_columns
 
 
+def load_samples_and_tile(
+    training_sites: list,
+    low_tide_delta_hrs: int,
+    low_tide_delta_mins: int,
+    max_cloud_cover: int,
+    method_2_threshold: float,
+    tile_size: int = 64,
+    stride: int = None,
+) -> tuple:
+    """Load the satellite imagery and UAV classification for each site, align the UAV
+    classification onto the satellite grid (mode per pixel), then cut both into fixed
+    size square tiles for U-Net training. Tiles that are entirely nodata are dropped.
+    Returns (tiles, labels) as numpy arrays of shape (N, bands, tile_size, tile_size)
+    and (N, tile_size, tile_size). This is a first-pass implementation - band
+    selection/normalisation and smarter tile filtering can be refined later."""
+
+    stride = stride or tile_size
+    tiles = []
+    labels = []
+    for training_site in training_sites:
+        print(f"Load and tile site: {training_site}")
+        satellite_file = utils.get_satellite_path(
+            site_name=training_site, low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
+            max_cloud_cover=max_cloud_cover
+        )
+        uav_file = utils.get_training_data_path(
+                site_name=training_site, sample_method="sampling_2", method_2_threshold=method_2_threshold,
+                low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
+                max_cloud_cover=max_cloud_cover
+            ).with_suffix(".nc")
+
+        satellite_data = utils.load_satellite(filename=satellite_file, chunks=None)
+        uav_labels = utils.load_classification(filename=uav_file, chunks=None)
+        satellite_data = satellite_data.reindex_like(uav_labels, method="nearest",)
+
+        label = numpy.where(
+            numpy.isnan(uav_labels.values),
+            utils.UAV_NAN_CLASS,
+            uav_labels.values,
+        ).astype(numpy.int64)
+        height, width = label.shape
+        print(f"\tTile images to {int(numpy.ceil(height/stride))*int(numpy.ceil(width/stride))}:"
+              f" ({int(numpy.ceil(height/stride))}, {int(numpy.ceil(width/stride))})")
+
+        for time_index in range(len(satellite_data["time"])):
+            # Select a fixed, ordered set of bands so every tile has the same channel count
+            image = satellite_data[sentinel2.BANDS].isel(time=time_index).to_array().values
+
+            for y in range(0, height, stride):
+                for x in range(0, width, stride):
+                    image_slice = image[:, y:y + tile_size, x:x + tile_size]
+                    label_slice = label[y:y + tile_size, x:x + tile_size]
+                    valid_labels = label_slice != utils.UAV_NAN_CLASS
+                    if numpy.isnan(image_slice).all() or not valid_labels.any():
+                        print(f"\t\tSkipping tile at position ({y}, {x}) due to NaN values.")
+                        continue
+
+                    image_tile = numpy.full(
+                        (image.shape[0], tile_size, tile_size),
+                        numpy.nan,
+                        dtype=numpy.float32,
+                    )
+                    label_tile = numpy.full(
+                        (tile_size, tile_size),
+                        utils.UAV_NAN_CLASS,
+                        dtype=numpy.int64,
+                    )
+                    slice_height, slice_width = label_slice.shape
+                    image_tile[:, :slice_height, :slice_width] = image_slice
+                    label_tile[:slice_height, :slice_width] = label_slice
+                    tiles.append(image_tile)
+                    labels.append(label_tile)
+
+    tiles = numpy.stack(tiles).astype(numpy.float32)
+    labels = numpy.stack(labels).astype(numpy.int64)
+
+    return tiles, labels
+
+
+class UNetClassifier(pytorch_lightning.LightningModule):
+    """Pixel-wise (semantic segmentation) classifier using the U-Net backbone from the
+    diffusers library (diffusers.UNet2DModel). The model is a plain classifier, not a
+    diffusion model - the timestep input required by UNet2DModel is fixed to zero and
+    unused."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        tile_size: int,
+        num_classes: int,
+        band_mean: list,
+        band_std: list,
+        learning_rate: float = 1e-4,
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+        self.register_buffer(
+            "band_mean",
+            torch.as_tensor(band_mean, dtype=torch.float32).reshape(1, -1, 1, 1),
+        )
+        self.register_buffer(
+            "band_std",
+            torch.as_tensor(band_std, dtype=torch.float32).reshape(1, -1, 1, 1),
+        )
+        self.unet = diffusers.UNet2DModel(
+            sample_size=tile_size,
+            in_channels=in_channels,
+            out_channels=num_classes,
+            layers_per_block=2,
+            block_out_channels=(32, 64, 128),
+            down_block_types=("DownBlock2D", "DownBlock2D", "AttnDownBlock2D"),
+            up_block_types=("AttnUpBlock2D", "UpBlock2D", "UpBlock2D"),
+        )
+        self.loss_function = torch.nn.CrossEntropyLoss(ignore_index=int(utils.UAV_NAN_CLASS))
+
+    def forward(self, tiles):
+        # UNet2DModel requires a diffusion timestep; unused here so fixed to zero
+        tiles = torch.where(torch.isfinite(tiles), tiles, self.band_mean)
+        tiles = (tiles - self.band_mean) / self.band_std
+        timesteps = torch.zeros(tiles.shape[0], dtype=torch.long, device=tiles.device)
+        return self.unet(tiles, timesteps).sample
+
+    def training_step(self, batch, batch_index):
+        batch_tiles, batch_labels = batch
+        loss = self.loss_function(self(batch_tiles), batch_labels)
+        self.log("train_loss", loss, prog_bar=True, on_epoch=True, on_step=False, batch_size=batch_tiles.shape[0])
+        return loss
+
+    def configure_optimizers(self):
+        # Can hve a learning rate decay - later - more complexity
+        return torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
+
+
+def train_unet_classifier(
+    tiles: numpy.ndarray,
+    labels: numpy.ndarray,
+    num_classes: int,
+    epochs: int = 20,
+    batch_size: int = 8,
+    learning_rate: float = 1e-4,
+):
+    """Train a U-Net pixel classifier (see UNetClassifier) with PyTorch Lightning.
+    `tiles` is (N, bands, tile_size, tile_size) and `labels` is (N, tile_size,
+    tile_size) of integer class ids, e.g. from load_samples_and_tile."""
+
+    print("\tTrain a U-Net Model") # consider caching to disk and loading
+    band_mean = numpy.nanmean(tiles, axis=(0, 2, 3))
+    band_std = numpy.nanstd(tiles, axis=(0, 2, 3))
+    band_mean = numpy.where(numpy.isfinite(band_mean), band_mean, 0.0)
+    band_std = numpy.where(numpy.isfinite(band_std) & (band_std > 0), band_std, 1.0)
+
+    dataset = torch.utils.data.TensorDataset(
+        torch.as_tensor(tiles, dtype=torch.float32),
+        torch.as_tensor(labels, dtype=torch.long),
+    )
+    data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    model = UNetClassifier(
+        in_channels=tiles.shape[1],
+        tile_size=tiles.shape[-1],
+        num_classes=num_classes,
+        band_mean=band_mean.tolist(),
+        band_std=band_std.tolist(),
+        learning_rate=learning_rate,
+    )
+
+    trainer = pytorch_lightning.Trainer(max_epochs=epochs, logger=False, enable_checkpointing=False)
+    trainer.fit(model, train_dataloaders=data_loader) # fit method can pass a checkpoint
+
+    return model
+
+
 def load_samples(
     training_sites: list,
     samples_path: pathlib.Path,
@@ -217,6 +392,44 @@ def map_satellite_ids_into_samples(
             ~samples_dataframe["SCL"].isin(sentinel2.SCL_TO_IGNORE)
         ]
     return samples_dataframe
+
+
+def map_satellite_ids_into_labels_array(
+    labels_array: numpy.ndarray,
+    uav_labels_file: pathlib.Path,
+    uav_classes_to_ignore: dict,
+    satellite_classes: dict,
+    satellite_from_uav_classes: dict,
+) -> numpy.ndarray:
+    """Map UAV class IDs in an array to satellite class IDs.
+
+    Ignored UAV classes are set to utils.UAV_NAN_CLASS. The input array is not modified.
+    """
+
+    uav_training_labels = (
+        pandas.read_csv(uav_labels_file, sep="\t", header=None, names=["Value", "Key"])
+        .set_index("Key")["Value"]
+        .to_dict()
+    )
+    source_labels = labels_array.copy()
+    satellite_labels = source_labels.astype(numpy.int64, copy=True)
+
+    class_ids_to_ignore = [
+        uav_training_labels[key] for key in uav_classes_to_ignore
+    ]
+    satellite_labels[numpy.isin(source_labels, class_ids_to_ignore)] = (
+        utils.UAV_NAN_CLASS
+    )
+
+    for satellite_class_name, uav_class_names in satellite_from_uav_classes.items():
+        class_ids_to_map = [
+            uav_training_labels[class_name] for class_name in uav_class_names
+        ]
+        satellite_labels[numpy.isin(source_labels, class_ids_to_map)] = (
+            satellite_classes[satellite_class_name]
+        )
+
+    return satellite_labels
 
 
 def time_index_for_date(data, date: str) -> int:

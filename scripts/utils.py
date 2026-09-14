@@ -30,32 +30,49 @@ def get_samples_folder(sample_method: str, method_2_threshold: float):
 
     return sample_folder
 
-def get_samples_path(sample_method: str, method_2_threshold: float, low_tide_delta: int, max_cloud_cover: int):
+def format_low_tide_delta(low_tide_delta_hrs: int, low_tide_delta_mins: int) -> str:
+    """Format a low tide delta (hours) for use in folder/file names, replacing the
+    decimal point with an underscore and dropping trailing zeros, e.g. 1.0 -> "1"."""
+    time_string = ""
+    if low_tide_delta_hrs > 0:
+        time_string += f"{low_tide_delta_hrs}hrs"
+    if low_tide_delta_mins > 0:
+        if time_string:
+            time_string += "_"
+        time_string += f"{low_tide_delta_mins}mins"
+    return time_string
+
+
+def get_samples_path(sample_method: str, method_2_threshold: float, low_tide_delta_hrs: int,
+                     low_tide_delta_mins: int, max_cloud_cover: int):
     """Get the path to the sample folder for a given sampling method."""
 
     sample_folder = get_samples_folder(sample_method, method_2_threshold)
 
     data_path = get_data_path()
-    samples_path = data_path / "training" / f"low_tide_delta_{low_tide_delta}_max_cloud_percentage_{max_cloud_cover}" / sample_folder
+    samples_path = data_path / "training" / f"low_tide_delta_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_max_cloud_percentage_{max_cloud_cover}" / sample_folder
     samples_path.mkdir(exist_ok=True, parents=True)
     return samples_path
 
 
-def get_spectral_plots_path(sample_method: str, method_2_threshold: float, low_tide_delta: int, max_cloud_cover: int):
+def get_spectral_plots_path(sample_method: str, method_2_threshold: float, low_tide_delta_hrs: int,
+                             low_tide_delta_mins: int, max_cloud_cover: int):
     """Get the path to the sample folder for a given sampling method."""
 
     sample_folder = get_samples_folder(sample_method, method_2_threshold)
 
     data_path = get_data_path()
-    spectral_plots_path = data_path / "training" / f"low_tide_delta_{low_tide_delta}_max_cloud_percentage_{max_cloud_cover}" / "spectral_plots" / sample_folder
+    spectral_plots_path = data_path / "training" / f"low_tide_delta_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_max_cloud_percentage_{max_cloud_cover}" / "spectral_plots" / sample_folder
     spectral_plots_path.mkdir(exist_ok=True, parents=True)
     return spectral_plots_path
 
 
-def get_samples_summary_file_path(sample_method: str, method_2_threshold: float, low_tide_delta: int, max_cloud_cover: int):
+def get_samples_summary_file_path(sample_method: str, method_2_threshold: float, low_tide_delta_hrs: int,
+                                   low_tide_delta_mins: int, max_cloud_cover: int):
     """Get the path to the sample summary file for a given sampling method."""
 
-    sample_folder_path = get_samples_path(sample_method, method_2_threshold, low_tide_delta, max_cloud_cover)
+    sample_folder_path = get_samples_path(sample_method, method_2_threshold,
+                                          low_tide_delta_hrs, low_tide_delta_mins, max_cloud_cover)
     return sample_folder_path / "samples_summary.csv"
 
 
@@ -65,49 +82,54 @@ def get_site_polygon_path(site_name: str):
     return data_path / "site_polygons" / f"{site_name}_polygon.gpkg"
 
 
-def get_satellite_path(site_name: str, low_tide_delta: int, max_cloud_cover: int):
+def get_satellite_path(site_name: str, low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int):
     """Get the path to the satellite file. Low_tide_delta in hrs, and max_cloud_cover
     as a percentage"""
     data_path = get_data_path()
-    satellite_path = data_path / "satellite_images" / f"low_tide_delta_{low_tide_delta}_max_cloud_percentage_{max_cloud_cover}"
+    satellite_path = data_path / "satellite_images" / f"low_tide_delta_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_max_cloud_percentage_{max_cloud_cover}"
     satellite_path.mkdir(exist_ok=True)
     return satellite_path / f"{site_name}_sentinel-2.nc"
 
 
-def get_training_data_path(site_name: str, sample_method: str, method_2_threshold: float, low_tide_delta: int, max_cloud_cover: int):
+def get_training_data_path(site_name: str, sample_method: str, method_2_threshold: float,
+                           low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int):
     """Get the path to the training data file."""
-    sample_folder_path = get_samples_path(sample_method, method_2_threshold, low_tide_delta, max_cloud_cover)
+    sample_folder_path = get_samples_path(sample_method, method_2_threshold,
+                                          low_tide_delta_hrs, low_tide_delta_mins, max_cloud_cover)
     return sample_folder_path / f"{site_name}_training_data.csv"
 
 
-def get_models_path(sample_method: str, method_2_threshold: float, low_tide_delta: int, max_cloud_cover: int):
+def get_models_path(sample_method: str, method_2_threshold: float,
+                    low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int):
     """Get the path to the sample folder for a given sampling method."""
 
     sample_folder = get_samples_folder(sample_method, method_2_threshold)
 
     data_path = get_data_path()
-    models_path = data_path / "models" / f"low_tide_delta_{low_tide_delta}_max_cloud_percentage_{max_cloud_cover}" / sample_folder
+    models_path = data_path / "models" / f"low_tide_delta_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_max_cloud_percentage_{max_cloud_cover}" / sample_folder
     models_path.mkdir(exist_ok=True, parents=True)
     return models_path
 
 
-def get_validation_path(sample_method: str, method_2_threshold: float, low_tide_delta: int, max_cloud_cover: int):
+def get_validation_path(sample_method: str, method_2_threshold: float,
+                        low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int):
     """Get the path to the sample folder for a given sampling method."""
 
     sample_folder = get_samples_folder(sample_method, method_2_threshold)
 
     data_path = get_data_path()
-    validation_path = data_path / "validation" /  f"low_tide_delta_{low_tide_delta}_max_cloud_percentage_{max_cloud_cover}" / sample_folder
+    validation_path = data_path / "validation" /  f"low_tide_delta_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_max_cloud_percentage_{max_cloud_cover}" / sample_folder
     validation_path.mkdir(exist_ok=True, parents=True)
     return validation_path
 
-def get_prediction_path(sample_method: str, method_2_threshold: float, low_tide_delta: int, max_cloud_cover: int):
+def get_prediction_path(sample_method: str, method_2_threshold: float,
+                        low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int):
     """Get the path to the sample folder for a given sampling method."""
 
     sample_folder = get_samples_folder(sample_method, method_2_threshold)
 
     data_path = get_data_path()
-    prediction_path = data_path / "predictions" /  f"low_tide_delta_{low_tide_delta}_max_cloud_percentage_{max_cloud_cover}" / sample_folder
+    prediction_path = data_path / "predictions" /  f"low_tide_delta_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_max_cloud_percentage_{max_cloud_cover}" / sample_folder
     prediction_path.mkdir(exist_ok=True, parents=True)
     return prediction_path
 
@@ -258,21 +280,24 @@ def mask_to_polygons(mask_dataframe, coarsen_ratio: int = None):
 def rgb_from_satellite(satellite_data_path):
     """Save out an RGB for each date in a nested 'rgb' folder"""
 
-    satellite_data = load_satellite(filename=satellite_data_path)
-    rgb_folder = satellite_data_path.parent / "rgb"
-    rgb_folder.mkdir(exist_ok=True)
-    for time_index in range(satellite_data.sizes["time"]):
-        rgb = satellite_data[["B04", "B03", "B02"]].isel(time=time_index).to_array("band")
-        date = str(satellite_data.time.isel(time=time_index).values)[:10]
+    if satellite_data_path.exists():
+        satellite_data = load_satellite(filename=satellite_data_path)
+        rgb_folder = satellite_data_path.parent / "rgb"
+        rgb_folder.mkdir(exist_ok=True)
+        for time_index in range(satellite_data.sizes["time"]):
+            rgb = satellite_data[["B04", "B03", "B02"]].isel(time=time_index).to_array("band")
+            date = str(satellite_data.time.isel(time=time_index).values)[:10]
 
-        # Sentinel-2 reflectance is scaled to 0-10000; create an 8-bit display RGB.
-        rgb = ((rgb.fillna(0).clip(min=0, max=3000) / 3000 * 255)
-               .round()
-               .astype("uint8")
-               .rio.write_nodata(0))
-        rgb.rio.to_raster(
-            rgb_folder / f"{satellite_data_path.stem}_{date}.tif",
-            dtype="uint8",
-            photometric="RGB",
-            compress="ZSTD",
-        )
+            # Sentinel-2 reflectance is scaled to 0-10000; create an 8-bit display RGB.
+            rgb = ((rgb.fillna(0).clip(min=0, max=3000) / 3000 * 255)
+                .round()
+                .astype("uint8")
+                .rio.write_nodata(0))
+            rgb.rio.to_raster(
+                rgb_folder / f"{satellite_data_path.stem}_{date}.tif",
+                dtype="uint8",
+                photometric="RGB",
+                compress="ZSTD",
+            )
+    else:
+        print(f"Satellite data path {satellite_data_path} does not exist.")
