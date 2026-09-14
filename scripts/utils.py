@@ -123,15 +123,28 @@ def get_validation_path(sample_method: str, method_2_threshold: float,
     return validation_path
 
 def get_prediction_path(sample_method: str, method_2_threshold: float,
-                        low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int):
+                        model_low_tide_delta_hrs: int, model_low_tide_delta_mins: int,
+                        max_cloud_cover: int, predict_low_tide_delta_hrs: int, predict_low_tide_delta_mins: int, ):
     """Get the path to the sample folder for a given sampling method."""
 
     sample_folder = get_samples_folder(sample_method, method_2_threshold)
 
     data_path = get_data_path()
-    prediction_path = data_path / "predictions" /  f"low_tide_delta_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_max_cloud_percentage_{max_cloud_cover}" / sample_folder
+    satellite_path = (
+        data_path / "predictions" 
+        / get_low_tide_max_cloud_name(predict_low_tide_delta_hrs, predict_low_tide_delta_mins, max_cloud_cover)
+        / "satellite_images"
+                      )
+    satellite_path.mkdir(exist_ok=True, parents=True)
+    prediction_path = (
+        satellite_path.parent /
+        f"model_{sample_folder}_{get_low_tide_max_cloud_name(model_low_tide_delta_hrs, model_low_tide_delta_mins, max_cloud_cover)}"
+                       )
     prediction_path.mkdir(exist_ok=True, parents=True)
-    return prediction_path
+    return prediction_path, satellite_path
+
+def get_low_tide_max_cloud_name(low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int):
+    return f"low_tide_delta_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_max_cloud_percentage_{max_cloud_cover}"
 
 
 def create_data_folders():

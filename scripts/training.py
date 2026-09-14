@@ -138,7 +138,7 @@ def load_samples_and_tile(
     max_cloud_cover: int,
     method_2_threshold: float,
     tile_size: int = 64,
-    stride: int = None,
+    stride: int = None, verbose: bool = False,
 ) -> tuple:
     """Load the satellite imagery and UAV classification for each site, align the UAV
     classification onto the satellite grid (mode per pixel), then cut both into fixed
@@ -151,7 +151,8 @@ def load_samples_and_tile(
     tiles = []
     labels = []
     for training_site in training_sites:
-        print(f"Load and tile site: {training_site}")
+        if verbose:
+            print(f"Load and tile site: {training_site}")
         satellite_file = utils.get_satellite_path(
             site_name=training_site, low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
             max_cloud_cover=max_cloud_cover
@@ -172,8 +173,9 @@ def load_samples_and_tile(
             uav_labels.values,
         ).astype(numpy.int64)
         height, width = label.shape
-        print(f"\tTile images to {int(numpy.ceil(height/stride))*int(numpy.ceil(width/stride))}:"
-              f" ({int(numpy.ceil(height/stride))}, {int(numpy.ceil(width/stride))})")
+        if verbose:
+            print(f"\tTile images to {int(numpy.ceil(height/stride))*int(numpy.ceil(width/stride))}:"
+                  f" ({int(numpy.ceil(height/stride))}, {int(numpy.ceil(width/stride))})")
 
         for time_index in range(len(satellite_data["time"])):
             # Select a fixed, ordered set of bands so every tile has the same channel count
@@ -185,7 +187,111 @@ def load_samples_and_tile(
                     label_slice = label[y:y + tile_size, x:x + tile_size]
                     valid_labels = label_slice != utils.UAV_NAN_CLASS
                     if numpy.isnan(image_slice).all() or not valid_labels.any():
-                        print(f"\t\tSkipping tile at position ({y}, {x}) due to NaN values.")
+                        if verbose:
+                            print(f"\t\tSkipping tile at position ({y}, {x}) due to NaN values.")
+                        continue
+
+                    image_tile = numpy.full(
+                        (image.shape[0], tile_size, tile_size),
+                        numpy.nan,
+                        dtype=numpy.float32,
+                    )
+                    label_tile = numpy.full(
+                        (tile_size, tile_size),
+                        utils.UAV_NAN_CLASS,
+                        dtype=numpy.int64,
+                    )
+                    slice_height, slice_width = label_slice.shape
+                    image_tile[:, :slice_height, :slice_width] = image_slice
+                    label_tile[:slice_height, :slice_width] = label_slice
+                    tiles.append(image_tile)
+                    labels.append(label_tile)
+
+    tiles = numpy.stack(tiles).astype(numpy.float32)
+    labels = numpy.stack(labels).astype(numpy.int64)
+
+    return tiles, labels
+
+
+def load_samples_and_tile_excluding_one_site_date(
+    training_sites: list,
+    test_site: str,
+    test_date: str,
+    low_tide_delta_hrs: int,
+    low_tide_delta_mins: int,
+    max_cloud_cover: int,
+    method_2_threshold: float,
+    tile_size: int = 64,
+    stride: int = None,
+    verbose: bool = False,
+) -> tuple:
+    """Same as load_samples_and_tile, but exclude the satellite image for test_site at
+    test_date (e.g. so it can be held out for testing). Mirrors how
+    load_samples_and_tile relates to
+    get_training_data_across_sites_excluding_one_site_date vs
+    get_training_data_across_sites."""
+
+    stride = stride or tile_size
+    tiles = []
+    labels = []
+    for training_site in training_sites:
+        if verbose:
+            print(f"Load and tile site: {training_site}")
+        satellite_file = utils.get_satellite_path(
+            site_name=training_site, low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
+            max_cloud_cover=max_cloud_cover
+        )
+        uav_file = utils.get_training_data_path(
+                site_name=training_site, sample_method="sampling_2", method_2_threshold=method_2_threshold,
+                low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
+                max_cloud_cover=max_cloud_cover
+            ).with_suffix(".nc")
+
+        satellite_data = utils.load_satellite(filename=satellite_file, chunks=None)
+        uav_labels = utils.load_classification(filename=uav_file, chunks=None)
+        satellite_data = satellite_data.reindex_like(uav_labels, method="nearest",)
+
+        # Identify (if present) the time index to exclude for the held out test site/date
+        excluded_time_index = None
+        if training_site == test_site:
+            dates = satellite_data["time"].dt.strftime("%Y-%m-%d").values
+            test_date_normalized = pandas.to_datetime(test_date).strftime("%Y-%m-%d")
+            matching_indices = numpy.flatnonzero(dates == test_date_normalized)
+            if len(matching_indices) == 0:
+                print(
+                    f"Warning: test date {test_date} is not present in "
+                    f"the satellite images for site {test_site}."
+                )
+            else:
+                excluded_time_index = int(matching_indices[0])
+
+        label = numpy.where(
+            numpy.isnan(uav_labels.values),
+            utils.UAV_NAN_CLASS,
+            uav_labels.values,
+        ).astype(numpy.int64)
+        height, width = label.shape
+        if verbose:
+            print(f"\tTile images to {int(numpy.ceil(height/stride))*int(numpy.ceil(width/stride))}:"
+                  f" ({int(numpy.ceil(height/stride))}, {int(numpy.ceil(width/stride))})")
+
+        for time_index in range(len(satellite_data["time"])):
+            if time_index == excluded_time_index:
+                if verbose:
+                    print(f"\tSkipping held out date at time index {time_index}")
+                continue
+
+            # Select a fixed, ordered set of bands so every tile has the same channel count
+            image = satellite_data[sentinel2.BANDS].isel(time=time_index).to_array().values
+
+            for y in range(0, height, stride):
+                for x in range(0, width, stride):
+                    image_slice = image[:, y:y + tile_size, x:x + tile_size]
+                    label_slice = label[y:y + tile_size, x:x + tile_size]
+                    valid_labels = label_slice != utils.UAV_NAN_CLASS
+                    if numpy.isnan(image_slice).all() or not valid_labels.any():
+                        if verbose:
+                            print(f"\t\tSkipping tile at position ({y}, {x}) due to NaN values.")
                         continue
 
                     image_tile = numpy.full(
@@ -308,8 +414,8 @@ def train_unet_classifier(
     )
     trainer = pytorch_lightning.Trainer(max_epochs=epochs, callbacks=[checkpoint_callback])
     trainer.fit(model, train_dataloaders=data_loader) # fit method can pass a checkpoint
-
-    return model
+    best_path = checkpoint_callback.best_model_path
+    return model, best_path
 
 
 def load_samples(
