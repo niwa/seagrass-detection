@@ -21,3 +21,8 @@ dependencies:
     - plotly_express
     - leafmap
     - seaborn
+    - torch
+    - diffusers
+    - pytorch-lightning
+    - iterative-stratification
+    - pytest

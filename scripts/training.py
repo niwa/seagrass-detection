@@ -5,6 +5,7 @@ import sentinel2
 import sampling
 import plotting
 import gc
+import typing
 import geopandas
 import xarray
 import pandas
@@ -18,6 +19,7 @@ import matplotlib.pyplot
 import torch
 import diffusers
 import pytorch_lightning
+import iterstrat.ml_stratifiers
 
 
 def get_training_data_across_sites(
@@ -314,6 +316,47 @@ def load_samples_and_tile_excluding_one_site_date(
     labels = numpy.stack(labels).astype(numpy.int64)
 
     return tiles, labels
+
+
+def class_counts_per_tile(labels: numpy.ndarray) -> numpy.ndarray:
+    """Return a (n_tiles, n_classes) matrix of per-class pixel counts within each
+    label tile, ignoring utils.UAV_NAN_CLASS. Used to stratify tile train/test splits
+    so the overall per-class pixel distribution (not just a single dominant class)
+    is preserved between the two sets."""
+
+    valid_classes = numpy.unique(labels[labels != utils.UAV_NAN_CLASS])
+    class_counts = numpy.zeros((labels.shape[0], len(valid_classes)), dtype=numpy.int64)
+    for index, label_tile in enumerate(labels):
+        tile_classes, tile_counts = numpy.unique(label_tile, return_counts=True)
+        for tile_class, tile_count in zip(tile_classes, tile_counts):
+            if tile_class == utils.UAV_NAN_CLASS:
+                continue
+            class_counts[index, numpy.searchsorted(valid_classes, tile_class)] = tile_count
+    return class_counts
+
+
+def randomise_tiles_to_test_and_training(
+    tiles: numpy.ndarray,
+    labels: numpy.ndarray,
+    test_threshold: float,
+    random_state: int = None,
+) -> tuple:
+    """Split tiles/labels (e.g. from load_samples_and_tile or
+    load_samples_and_tile_excluding_one_site_date) into train and test sets. Mirrors
+    randomise_to_test_and_training_across_sites, but for tiled U-Net data: uses
+    iterative multilabel stratification (iterstrat) over the full per-class pixel
+    count matrix for each tile, so the overall per-class pixel distribution is
+    balanced between the two sets rather than just a single dominant class per tile.
+    Returns (train_tiles, train_labels, test_tiles, test_labels)."""
+
+    class_counts = class_counts_per_tile(labels)
+
+    splitter = iterstrat.ml_stratifiers.MultilabelStratifiedShuffleSplit(
+        n_splits=1, test_size=test_threshold, random_state=random_state
+    )
+    train_indices, test_indices = next(splitter.split(tiles, class_counts))
+
+    return tiles[train_indices], labels[train_indices], tiles[test_indices], labels[test_indices]
 
 
 class UNetClassifier(pytorch_lightning.LightningModule):
@@ -645,6 +688,107 @@ def predict_site(
     return predictions, satellite_data
 
 
+def predict_tile_probabilities_unet(
+    model,
+    image: numpy.ndarray,
+    tile_size: int,
+    stride: int,
+    device,
+) -> numpy.ndarray:
+    """Predict per-class probabilities across a single (bands, height, width) image
+    using overlapping tiles (stride < tile_size), averaging softmax probabilities in
+    overlapping regions to reduce blockiness at tile boundaries. Returns a
+    (num_classes, height, width) array of mean probabilities."""
+
+    num_classes = model.hparams.num_classes
+    height, width = image.shape[1], image.shape[2]
+
+    probability_sums = numpy.zeros((num_classes, height, width), dtype=numpy.float32)
+    overlap_counts = numpy.zeros((height, width), dtype=numpy.float32)
+
+    for y in range(0, height, stride):
+        for x in range(0, width, stride):
+            # Extract and pad tile
+            image_slice = image[:, y:y + tile_size, x:x + tile_size]
+
+            image_tile = numpy.full(
+                (image.shape[0], tile_size, tile_size),
+                numpy.nan,
+                dtype=numpy.float32,
+            )
+            slice_height, slice_width = image_slice.shape[1], image_slice.shape[2]
+            image_tile[:, :slice_height, :slice_width] = image_slice
+
+            # Convert to tensor and predict
+            with torch.no_grad():
+                tile_tensor = torch.as_tensor(
+                    image_tile[numpy.newaxis, ...], dtype=torch.float32, device=device
+                )
+                logits = model(tile_tensor)  # (1, num_classes, tile_size, tile_size)
+                tile_probabilities = (
+                    torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+                )
+
+            # Accumulate probabilities for the valid (non-padded) region only
+            probability_sums[:, y:y + slice_height, x:x + slice_width] += (
+                tile_probabilities[:, :slice_height, :slice_width]
+            )
+            overlap_counts[y:y + slice_height, x:x + slice_width] += 1
+
+    if (overlap_counts == 0).any():
+        print("\t\tWarning: some pixels were not predicted.")
+
+    return probability_sums / numpy.maximum(overlap_counts, 1)
+
+
+def predict_site_for_date_unet(
+    test_satellite_file: pathlib.Path,
+    polygon_file: pathlib.Path,
+    checkpoint_file: pathlib.Path,
+    date: str,
+    tile_size: int = 128,
+    stride: int = 64,
+):
+    """Predict classes for the satellite image on the given date (e.g. "2025-04-27")
+    using a trained U-Net checkpoint. Mirrors predict_site_for_date, but for the U-Net
+    model - see predict_site_unet for the multi-date equivalent."""
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\tLoading U-Net checkpoint from {checkpoint_file}")
+    model = UNetClassifier.load_from_checkpoint(checkpoint_file)
+    model = model.to(device)
+    model.eval()
+
+    satellite_data = utils.load_satellite(filename=test_satellite_file, chunks=None)
+    uav_polygon = geopandas.read_file(polygon_file)
+
+    time_index = time_index_for_date(data=satellite_data, date=date)
+
+    print(f"\tPredict satellite image for date {date}")
+    image = satellite_data[sentinel2.BANDS].isel(time=time_index).to_array().values
+    mean_probabilities = predict_tile_probabilities_unet(
+        model=model, image=image, tile_size=tile_size, stride=stride, device=device
+    )
+    predictions = numpy.argmax(mean_probabilities, axis=0).astype(utils.CLASSIFICATION_DTYPE)
+
+    predictions = xarray.DataArray(
+        [predictions],
+        coords={
+            "time": numpy.atleast_1d(satellite_data["time"][time_index]),
+            "y": satellite_data.y,
+            "x": satellite_data.x,
+        },
+        dims=["time", "y", "x"],
+    )
+
+    predictions.rio.write_crs(input_crs=utils.CRS_NZTM, inplace=True)
+    predictions = predictions.rio.clip(
+        uav_polygon.geometry, all_touched=True, drop=True
+    )
+
+    return predictions
+
+
 def predict_site_unet(
     test_satellite_file: pathlib.Path,
     polygon_file: pathlib.Path,
@@ -667,7 +811,6 @@ def predict_site_unet(
     satellite_data = utils.load_satellite(filename=test_satellite_file, chunks=None)
     uav_polygon = geopandas.read_file(polygon_file)
 
-    num_classes = model.hparams.num_classes
     predictions_list = []
     satellite_dates = satellite_data["time"].dt.strftime("%Y-%m-%d").values
     print(f"\tPredict for {len(satellite_dates)} satellite images")
@@ -675,47 +818,9 @@ def predict_site_unet(
     for time_index in range(len(satellite_data["time"])):
         # Select a fixed, ordered set of bands
         image = satellite_data[sentinel2.BANDS].isel(time=time_index).to_array().values
-        height, width = image.shape[1], image.shape[2]
-
-        # Accumulate class probabilities across overlapping tiles, then average
-        probability_sums = numpy.zeros((num_classes, height, width), dtype=numpy.float32)
-        overlap_counts = numpy.zeros((height, width), dtype=numpy.float32)
-
-        for y in range(0, height, stride):
-            for x in range(0, width, stride):
-                # Extract and pad tile
-                image_slice = image[:, y:y + tile_size, x:x + tile_size]
-
-                image_tile = numpy.full(
-                    (image.shape[0], tile_size, tile_size),
-                    numpy.nan,
-                    dtype=numpy.float32,
-                )
-                slice_height, slice_width = image_slice.shape[1], image_slice.shape[2]
-                image_tile[:, :slice_height, :slice_width] = image_slice
-
-                # Convert to tensor and predict
-                with torch.no_grad():
-                    tile_tensor = torch.as_tensor(
-                        image_tile[numpy.newaxis, ...], dtype=torch.float32, device=device
-                    )
-                    logits = model(tile_tensor)  # (1, num_classes, tile_size, tile_size)
-                    tile_probabilities = (
-                        torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
-                    )
-
-                # Accumulate probabilities for the valid (non-padded) region only
-                probability_sums[:, y:y + slice_height, x:x + slice_width] += (
-                    tile_probabilities[:, :slice_height, :slice_width]
-                )
-                overlap_counts[y:y + slice_height, x:x + slice_width] += 1
-
-        # Ensure all pixels were predicted (sanity check)
-        if (overlap_counts == 0).any():
-            print(f"\t\tWarning: some pixels were not predicted for time index {time_index}")
-
-        # Average overlapping probabilities then take the most likely class
-        mean_probabilities = probability_sums / numpy.maximum(overlap_counts, 1)
+        mean_probabilities = predict_tile_probabilities_unet(
+            model=model, image=image, tile_size=tile_size, stride=stride, device=device
+        )
         predictions = numpy.argmax(mean_probabilities, axis=0).astype(utils.CLASSIFICATION_DTYPE)
 
         # Convert to DataArray and clip to polygon
@@ -760,6 +865,38 @@ def predict_samples(
     )
 
     return test_dataframe
+
+
+def predict_samples_unet(
+    test_tiles: numpy.ndarray,
+    checkpoint_file: pathlib.Path,
+    batch_size: int = 8,
+) -> numpy.ndarray:
+    """Predict classes for each tile using a trained U-Net checkpoint (see
+    UNetClassifier and train_unet_classifier). `test_tiles` is (N, bands, tile_size,
+    tile_size), e.g. from randomise_tiles_to_test_and_training. Returns predicted
+    labels as (N, tile_size, tile_size) integer class ids."""
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\tLoading U-Net checkpoint from {checkpoint_file}")
+    model = UNetClassifier.load_from_checkpoint(checkpoint_file)
+    model = model.to(device)
+    model.eval()
+
+    print(f"\tPredict {len(test_tiles)} tiles")
+    predicted_labels = []
+    with torch.no_grad():
+        for start in range(0, len(test_tiles), batch_size):
+            batch_tiles = torch.as_tensor(
+                test_tiles[start:start + batch_size], dtype=torch.float32, device=device
+            )
+            logits = model(batch_tiles)
+            batch_predictions = torch.argmax(logits, dim=1).cpu().numpy()
+            predicted_labels.append(batch_predictions)
+
+    predicted_labels = numpy.concatenate(predicted_labels).astype(utils.CLASSIFICATION_DTYPE)
+
+    return predicted_labels
 
 
 def load_truth_and_predictions(
@@ -1015,16 +1152,20 @@ def confusion_matrix_of_site(
 
 
 def confusion_matrix_of_pixels(
-    predictions: pandas.DataFrame,
+    predictions: typing.Union[pandas.Series, numpy.ndarray],
+    truth: typing.Union[pandas.Series, numpy.ndarray],
     satellite_classes: dict,
     plot_filename: pathlib.Path,
     plot_title: str,
 ):
     """Calculate the normalized confusion matrix for pixel classifications."""
 
+    # drop any NaN class values from the truth prior to calculating the confusion matrix
+    mask = truth != utils.UAV_NAN_CLASS
+
     plotting.plot_confusion_matrix(
-        truth=predictions["satellite_class_id"],
-        predictions=predictions["predicted_class_id"],
+        truth=truth[mask],
+        predictions=predictions[mask],
         class_names=satellite_classes,
         plot_filename=plot_filename,
         title=plot_title,

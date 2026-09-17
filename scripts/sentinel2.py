@@ -12,6 +12,7 @@ import numpy
 import xarray
 import dotenv
 import os
+import time
 
 
 CATALOGUE_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
@@ -23,6 +24,7 @@ DATE_FORMAT_YYYYMMDD = "%Y-%m-%d"
 TIDE_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 TIDE_API_STUB = "https://api.niwa.co.nz/tides/data"
+TIDE_API_RETRY_DELAY_SECONDS = 1
 LOW_TIDE_DELTA = 2  # in hrs
 
 S2_RESOLUTION = 10
@@ -63,6 +65,26 @@ def empty_satellite_dataset():
     )
 
 
+def stac_search_with_retry(max_retries: int = 5, initial_delay_seconds: float = 5.0, **stac_search_kwargs):
+    """Call leafmap.stac_search with retries and exponential backoff, to handle
+    transient STAC catalogue errors (e.g. 502 Bad Gateway from the Planetary
+    Computer API)."""
+
+    delay_seconds = initial_delay_seconds
+    for attempt in range(1, max_retries + 1):
+        try:
+            return leafmap.stac_search(**stac_search_kwargs)
+        except Exception as error:
+            if attempt == max_retries:
+                raise
+            print(
+                f"\tSTAC search failed (attempt {attempt}/{max_retries}): {error}. "
+                f"Retrying in {delay_seconds:.0f}s..."
+            )
+            time.sleep(delay_seconds)
+            delay_seconds *= 2
+
+
 def get_satellite_date_range(site_name: str, date_file: pathlib.Path,
                              search_days: int):
     """Read in the data file and return a date range given the
@@ -94,7 +116,7 @@ def get_low_tide_images_near_date(
         utils.CRS_WSG
     )  # ensure includes pixles on edge
 
-    search_collection = leafmap.stac_search(
+    search_collection = stac_search_with_retry(
         url=CATALOGUE_URL,
         max_items=200,
         collections=[COLLECTION],
@@ -105,8 +127,8 @@ def get_low_tide_images_near_date(
     )
 
     items = search_collection.items
-    lat = float(geometry_WSG.centroid.y)
-    lon = float(geometry_WSG.centroid.x)
+    lat = float(geometry_WSG.centroid.y.squeeze())
+    lon = float(geometry_WSG.centroid.x.squeeze())
     all_tide_n = len(items)
     low_tide = []
     for item in items:
@@ -114,6 +136,7 @@ def get_low_tide_images_near_date(
             check_low_tide(item, lat=lat, lon=lon, low_tide_delta_hrs=low_tide_delta_hrs,
                            low_tide_delta_mins=low_tide_delta_mins)
         )
+
     items = [item for item, low_tide in zip(items, low_tide) if low_tide]
 
     if len(items) == 0:
@@ -135,6 +158,7 @@ def get_low_tide_images_near_date(
     data = data.rio.clip(
         geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
     )
+    data.load()
     print(
         f"\tLow tide tiles: {len(data['time'])} from a total lowish cloud "
         f"cover tiles of {all_tide_n}"
@@ -161,11 +185,11 @@ def get_low_tide_images_in_year(geometry, year: int, low_tide_delta_hrs: int,
     )
 
     items = search_collection.items
-    lat = float(geometry_WSG.centroid.y)
-    lon = float(geometry_WSG.centroid.x)
+    lat = float(geometry_WSG.centroid.y.squeeze())
+    lon = float(geometry_WSG.centroid.x.squeeze())
     all_tide_n = len(items)
     low_tide = []
-    for index, item in enumerate(items):
+    for item in items:
         low_tide.append(
             check_low_tide(item, lat=lat, lon=lon, low_tide_delta_hrs=low_tide_delta_hrs,
                            low_tide_delta_mins=low_tide_delta_mins)
@@ -188,6 +212,7 @@ def get_low_tide_images_in_year(geometry, year: int, low_tide_delta_hrs: int,
     data = data.rio.clip(
         geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
     )
+    data.load()
     print(
         f"\tLow tide tiles: {len(data['time'])} from a total lowish cloud "
         f"cover tiles of {all_tide_n}"
@@ -202,7 +227,7 @@ def get_satellite_for_date(geometry, date_YYMMDD: str):
         utils.CRS_WSG
     )  # ensure includes pixles on edge
 
-    search_collection = leafmap.stac_search(
+    search_collection = stac_search_with_retry(
         url=CATALOGUE_URL,
         max_items=400,
         collections=[COLLECTION],
@@ -232,11 +257,10 @@ def get_low_tide_no_cloud_images_near_date(
         return data
 
     # keep only values with less cloud cover than the specified percentatge
-    cloud_cover_percentage = (
-                100
-                * data["SCL"].isin(SCL_TO_IGNORE).sum(dim=["x", "y"]).compute()
-                / len(data["SCL"].data.flatten())
-            )
+    cloud_cover_percentage = (  # mean = % as mask is zeros and ones
+        100
+        * data["SCL"].isin(SCL_TO_IGNORE).mean(dim=["x", "y"]).compute()
+    )
     data = data.where(
         cloud_cover_percentage <= max_cloud_cover,
         drop=True,
@@ -249,10 +273,9 @@ def get_low_tide_no_cloud_images_near_date(
 
     # Harmonize any post-2022 data - TODO - do for float32 too
     for index in range(len(data["time"])):
-        date = datetime.datetime.fromtimestamp(
-            data["time"].isel(time=index).values.item() / 1e9,
-            datetime.timezone.utc
-        )
+        date = pandas.Timestamp(
+            data["time"].isel(time=index).values
+        ).tz_localize("UTC").to_pydatetime()
         data_i = data.isel(time=index)
         harmonize_post_2022(data=data_i, date=date)
         utils.write_netcdf_conventions_in_place(data_i)
@@ -269,13 +292,12 @@ def get_low_tide_no_cloud_images_in_year(
     number_of_low_tide_dates = len(data["time"])
 
     # keep only values with less cloud cover than the specified percentatge
+    cloud_cover_percentage = (
+        100
+        * data["SCL"].isin(SCL_TO_IGNORE).mean(dim=["x", "y"]).compute()
+    )
     data = data.where(
-        (
-            100
-            * data["SCL"].isin(SCL_TO_IGNORE).sum(dim=["x", "y"]).compute()
-            / len(data["SCL"].data.flatten())
-        )
-        <= max_cloud_cover,
+        cloud_cover_percentage <= max_cloud_cover,
         drop=True,
     )
     print(
@@ -285,10 +307,9 @@ def get_low_tide_no_cloud_images_in_year(
 
     # Harmonize any post-2022 data - TODO - do for float32 too
     for index in range(len(data["time"])):
-        date = datetime.datetime.fromtimestamp(
-            data["time"].isel(time=index).values.item() / 1e9,
-            datetime.timezone.utc
-        )
+        date = pandas.Timestamp(
+            data["time"].isel(time=index).values
+        ).tz_localize("UTC").to_pydatetime()
         data_i = data.isel(time=index)
         harmonize_post_2022(data=data_i, date=date)
         utils.write_netcdf_conventions_in_place(data_i)
@@ -350,8 +371,23 @@ def check_low_tide(item, lat, lon, low_tide_delta_hrs: int, low_tide_delta_mins:
         f"&numberOfDays=2&apikey={tide_api_key}&startDate={start_date}"
     )
 
-    tide_query = requests.get(tide_url)
-    tide_query.raise_for_status()
+    for attempt in range(1, 201):
+        try:
+            tide_query = requests.get(tide_url)
+            tide_query.raise_for_status()
+            break
+        except requests.RequestException as error:
+            if attempt == 200:
+                raise RuntimeError(
+                    f"Could not get the low tide API to respond after 200 attempts "
+                    f"for item {item}."
+                ) from error
+            print(
+                f"\tIgnore error {error} and try again in "
+                f"{TIDE_API_RETRY_DELAY_SECONDS} second."
+            )
+            time.sleep(TIDE_API_RETRY_DELAY_SECONDS)
+
     tide_times = tide_query.json()["values"]
     low_tide = False
     for tide_time in tide_times:
