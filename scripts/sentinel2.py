@@ -371,15 +371,15 @@ def check_low_tide(item, lat, lon, low_tide_delta_hrs: int, low_tide_delta_mins:
         f"&numberOfDays=2&apikey={tide_api_key}&startDate={start_date}"
     )
 
-    for attempt in range(1, 201):
+    for attempt in range(1, 3):
         try:
             tide_query = requests.get(tide_url)
             tide_query.raise_for_status()
             break
         except requests.RequestException as error:
-            if attempt == 200:
+            if attempt == 2:
                 raise RuntimeError(
-                    f"Could not get the low tide API to respond after 200 attempts "
+                    f"Could not get the low tide API to respond after 2 attempts "
                     f"for item {item}."
                 ) from error
             print(
