@@ -124,7 +124,8 @@ def get_validation_path(sample_method: str, method_2_threshold: float,
 
 def get_prediction_path(sample_method: str, method_2_threshold: float,
                         model_low_tide_delta_hrs: int, model_low_tide_delta_mins: int,
-                        max_cloud_cover: int, predict_low_tide_delta_hrs: int, predict_low_tide_delta_mins: int, ):
+                        model_max_cloud_cover: int, predict_max_cloud_cover: int,
+                        predict_low_tide_delta_hrs: int, predict_low_tide_delta_mins: int, ):
     """Get the path to the sample folder for a given sampling method."""
 
     sample_folder = get_samples_folder(sample_method, method_2_threshold)
@@ -132,13 +133,13 @@ def get_prediction_path(sample_method: str, method_2_threshold: float,
     data_path = get_data_path()
     satellite_path = (
         data_path / "predictions" 
-        / get_low_tide_max_cloud_name(predict_low_tide_delta_hrs, predict_low_tide_delta_mins, max_cloud_cover)
+        / get_low_tide_max_cloud_name(predict_low_tide_delta_hrs, predict_low_tide_delta_mins, predict_max_cloud_cover)
         / "satellite_images"
                       )
     satellite_path.mkdir(exist_ok=True, parents=True)
     prediction_path = (
         satellite_path.parent /
-        f"model_{sample_folder}_{get_low_tide_max_cloud_name(model_low_tide_delta_hrs, model_low_tide_delta_mins, max_cloud_cover)}"
+        f"model_{sample_folder}_{get_low_tide_max_cloud_name(model_low_tide_delta_hrs, model_low_tide_delta_mins, model_max_cloud_cover)}"
                        )
     prediction_path.mkdir(exist_ok=True, parents=True)
     return prediction_path, satellite_path
@@ -263,16 +264,25 @@ def load_classification(filename: pathlib, chunks: bool = True, masked: bool = T
     return classified_data
 
 
-def mask_to_polygons(mask_dataframe, coarsen_ratio: int = None):
+def mask_to_polygons(mask_dataframe, coarsen_ratio: int = None, keep_all_coarsen: bool = True):
     """
     Convert a rioxarray mask (DataArray) to a GeoDataFrame of polygons.
     Only True (or 1) values are converted to polygons. Note if coarsen
     specified apply to coarsen versioned of data frame
     """
-    if coarsen_ratio is not None:
+    if coarsen_ratio is not None and keep_all_coarsen:
+        # Coarsen but keep any True values at coarsened resolution
         mask_dataframe = mask_dataframe.coarsen(
             x=coarsen_ratio, y=coarsen_ratio, boundary="pad"
         ).max(skipna=True)
+        mask_dataframe.rio.write_transform(
+            mask_dataframe.rio.transform(recalc=True), inplace=True
+        )
+    elif coarsen_ratio is not None and not keep_all_coarsen:
+        # Coarsen but only keep True values if the majority of the coarsened block is True
+        mask_dataframe = mask_dataframe.coarsen(
+            x=coarsen_ratio, y=coarsen_ratio, boundary="pad"
+        ).mean(skipna=True) > 0.5
         mask_dataframe.rio.write_transform(
             mask_dataframe.rio.transform(recalc=True), inplace=True
         )
@@ -284,6 +294,9 @@ def mask_to_polygons(mask_dataframe, coarsen_ratio: int = None):
     polygons = [
         shapely.geometry.shape(geom) for geom, value in shapes if value == 1
         ]
+    if not polygons:
+        # Ensure callers always get a single (dissolved) geometry, even when empty
+        polygons = [shapely.geometry.Polygon()]
     polygon_dataframe = geopandas.GeoDataFrame(
         geometry=polygons, crs=mask_dataframe.rio.crs
     )

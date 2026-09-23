@@ -7,6 +7,9 @@ import numpy
 import pathlib
 import re
 import matplotlib.pyplot
+import plotly.colors
+import plotly.graph_objects
+import plotly.subplots
 import utils
 
 
@@ -221,3 +224,179 @@ def plot_validation_confusion_matrices(
     figure.savefig(output_path, dpi=150)
     matplotlib.pyplot.close(figure)
     return output_path
+
+
+def _add_target_traces(
+    figure, target, surveyed_dataframe, predictions, row, col, axis_number,
+    survey_color, per_combination_labels, shown_legend_groups, predicted_color=None, predicted_colors=None
+):
+    """Add prediction + surveyed traces for one target to one subplot, holding the
+    surveyed value flat out to both edges of that subplot's x-axis (no extra markers).
+
+    Legend entries are de-duplicated via shown_legend_groups: when per_combination_labels
+    is True, one entry per prediction label shared across all target subplots (since the
+    label/survey line don't mention the target); otherwise one shared entry per target.
+    """
+    column = f"{target} Area [m^2]"
+    for label, prediction_dataframe in predictions:
+        if column not in prediction_dataframe.columns:
+            continue
+        group = label if per_combination_labels else f"{target}_predicted"
+        color = predicted_colors.get(label) if predicted_colors is not None else predicted_color
+        figure.add_trace(
+            plotly.graph_objects.Scatter(
+                x=prediction_dataframe["date"], y=prediction_dataframe[column],
+                mode="lines+markers", line=dict(color=color),
+                name=label if per_combination_labels else f"{target} (predicted)",
+                legendgroup=group, showlegend=group not in shown_legend_groups,
+            ),
+            row=row, col=col
+        )
+        shown_legend_groups.add(group)
+
+    if surveyed_dataframe is None or target not in surveyed_dataframe.columns:
+        return
+
+    surveyed_group = "surveyed" if per_combination_labels else f"{target}_surveyed"
+    figure.add_trace(
+        plotly.graph_objects.Scatter(
+            x=surveyed_dataframe["date"], y=surveyed_dataframe[target],
+            mode="lines+markers", line=dict(color=survey_color, dash="dot", shape="hv"),
+            name="Surveyed (UAV)" if per_combination_labels else f"{target} (surveyed)",
+            legendgroup=surveyed_group, showlegend=surveyed_group not in shown_legend_groups,
+        ),
+        row=row, col=col
+    )
+    shown_legend_groups.add(surveyed_group)
+
+    dates = [surveyed_dataframe["date"]] + [
+        prediction_dataframe["date"] for _, prediction_dataframe in predictions
+    ]
+    axis_min_date, axis_max_date = pandas.concat(dates).min(), pandas.concat(dates).max()
+    first_date, first_value = surveyed_dataframe["date"].iloc[0], surveyed_dataframe[target].iloc[0]
+    last_date, last_value = surveyed_dataframe["date"].iloc[-1], surveyed_dataframe[target].iloc[-1]
+    for x0, x1, y in ((axis_min_date, first_date, first_value), (last_date, axis_max_date, last_value)):
+        figure.add_shape(
+            type="line", xref=f"x{axis_number}", yref=f"y{axis_number}",
+            x0=x0, x1=x1, y0=y, y1=y,
+            line=dict(color=survey_color, dash="dot"),
+        )
+    figure.update_xaxes(range=[axis_min_date, axis_max_date], row=row, col=col)
+
+
+def plot_site_predicted_vs_surveyed_areas(
+    data_path: pathlib.Path,
+    targets: list = ("Seagrass", "Ulva", "Gracilaria"),
+):
+    """Plot, per site, predicted (across model/prediction parameter combinations) vs
+    surveyed UAV target areas over time. Saves one interactive HTML per site, plus a
+    composite summary HTML with one subplot per site."""
+    website_path = data_path / "website"
+    uav_areas_path = website_path / "uav_areas"
+
+    folder_pattern = re.compile(
+        r"RF_model_10_percent_test_sampling_2_(?P<method_2_threshold>\d+)_percent_"
+        r"low_tide_delta_(?:(?P<model_hours>\d+)hrs(?:_(?P<model_minutes>\d+)mins)?|"
+        r"(?P<model_minutes_only>\d+)mins)_max_cloud_percentage_(?P<model_cloud>\d+)_"
+        r"predict_over_low_tide_delta_(?:(?P<predict_hours>\d+)hrs(?:_(?P<predict_minutes>\d+)mins)?|"
+        r"(?P<predict_minutes_only>\d+)mins)_max_cloud_percentage_(?P<predict_cloud>\d+)"
+    )
+
+    model_folders = [
+        folder for folder in website_path.iterdir()
+        if folder.is_dir() and folder_pattern.fullmatch(folder.name) is not None
+    ]
+    if not model_folders:
+        raise FileNotFoundError(f"No model prediction folders found in {website_path}")
+
+    site_names = sorted({
+        site_folder.name
+        for model_folder in model_folders
+        for site_folder in model_folder.iterdir()
+        if site_folder.is_dir()
+    })
+
+    output_directory = website_path / "site_area_timeseries"
+    output_directory.mkdir(parents=True, exist_ok=True)
+    target_colors = {"Seagrass": "green", "Ulva": "orange", "Gracilaria": "purple"}
+    target_survey_colors = {"Seagrass": "darkgreen", "Ulva": "chocolate", "Gracilaria": "indigo"}
+
+    site_data = {}
+    for site_name in site_names:
+        surveyed_dataframe = None
+        surveyed_csv = uav_areas_path / site_name / "uav_areas.csv"
+        if surveyed_csv.exists():
+            surveyed_dataframe = pandas.read_csv(surveyed_csv, parse_dates=["date"])
+
+        predictions = []
+        for model_folder in model_folders:
+            info_csv = model_folder / site_name / "info_all_dates.csv"
+            if not info_csv.exists():
+                continue
+
+            folder_match = folder_pattern.fullmatch(model_folder.name)
+            model_hours = int(folder_match.group("model_hours") or 0)
+            model_minutes = int(
+                folder_match.group("model_minutes_only") or folder_match.group("model_minutes") or 0
+            )
+            predict_hours = int(folder_match.group("predict_hours") or 0)
+            predict_minutes = int(
+                folder_match.group("predict_minutes_only") or folder_match.group("predict_minutes") or 0
+            )
+            label = (
+                f"model dt={model_hours * 60 + model_minutes}min "
+                f"cloud<={folder_match.group('model_cloud')}%, "
+                f"predict dt={predict_hours * 60 + predict_minutes}min "
+                f"cloud<={folder_match.group('predict_cloud')}%"
+            )
+            predictions.append((label, pandas.read_csv(info_csv, parse_dates=["date"])))
+
+        if surveyed_dataframe is None and not predictions:
+            continue
+        site_data[site_name] = (surveyed_dataframe, predictions)
+
+    output_paths = []
+
+    for site_name, (surveyed_dataframe, predictions) in site_data.items():
+        palette = plotly.colors.qualitative.Plotly
+        combination_colors = {label: palette[i % len(palette)] for i, (label, _) in enumerate(predictions)}
+        figure = plotly.subplots.make_subplots(rows=len(targets), cols=1, subplot_titles=list(targets))
+        shown_legend_groups = set()
+
+        for row_index, target in enumerate(targets, start=1):
+            _add_target_traces(
+                figure, target, surveyed_dataframe, predictions,
+                row=row_index, col=1, axis_number=row_index,
+                survey_color="black", per_combination_labels=True,
+                predicted_colors=combination_colors, shown_legend_groups=shown_legend_groups,
+            )
+
+        figure.update_layout(height=400 * len(targets), width=900, title=f"{site_name}: predicted vs surveyed areas")
+        output_path = output_directory / f"{site_name}_target_area_timeseries.html"
+        figure.write_html(output_path)
+        output_paths.append(output_path)
+
+    if site_data:
+        ncols = 3
+        nrows = int(numpy.ceil(len(site_data) / ncols))
+        figure = plotly.subplots.make_subplots(
+            rows=nrows, cols=ncols, subplot_titles=list(site_data.keys())
+        )
+        shown_legend_groups = set()
+
+        for index, (site_name, (surveyed_dataframe, predictions)) in enumerate(site_data.items()):
+            row, col = index // ncols + 1, index % ncols + 1
+            for target in targets:
+                _add_target_traces(
+                    figure, target, surveyed_dataframe, predictions,
+                    row=row, col=col, axis_number=index + 1,
+                    predicted_color=target_colors.get(target), survey_color=target_survey_colors.get(target),
+                    per_combination_labels=False, shown_legend_groups=shown_legend_groups,
+                )
+
+        figure.update_layout(height=400 * nrows, width=500 * ncols, title="Predicted vs surveyed target areas")
+        composite_path = output_directory / "all_sites_target_area_timeseries.html"
+        figure.write_html(composite_path)
+        output_paths.append(composite_path)
+
+    return output_paths
