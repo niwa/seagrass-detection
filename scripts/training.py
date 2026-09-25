@@ -17,9 +17,14 @@ import numpy
 import pathlib
 import matplotlib.pyplot
 import torch
-import diffusers
+import segmentation_models_pytorch
+import huggingface_hub
 import pytorch_lightning
 import iterstrat.ml_stratifiers
+
+
+UNET_BANDS = ["B02", "B03", "B04", "B08", "B11", "B12"]
+UNET_PRETRAINED_REPO = "giswqs/s2-water-unetplusplus-efficientnet-b4"
 
 
 def get_training_data_across_sites(
@@ -165,6 +170,15 @@ def load_samples_and_tile(
                 max_cloud_cover=max_cloud_cover
             ).with_suffix(".nc")
 
+        if not satellite_file.exists():
+            print(f"\tWARNING - no satellite image for site {training_site} (no valid low tide/"
+                  "low cloud image was available). Skipping this site.")
+            continue
+        if not uav_file.exists():
+            raise ValueError(f"\tWARNING - no training raster extracted from the UAV classification for site"
+                             f" {training_site}. Please run extract_training_samples_raster.ipynb.")
+                    
+
         satellite_data = utils.load_satellite(filename=satellite_file, chunks=None)
         uav_labels = utils.load_classification(filename=uav_file, chunks=None)
         satellite_data = satellite_data.reindex_like(uav_labels, method="nearest",)
@@ -181,7 +195,7 @@ def load_samples_and_tile(
 
         for time_index in range(len(satellite_data["time"])):
             # Select a fixed, ordered set of bands so every tile has the same channel count
-            image = satellite_data[sentinel2.BANDS].isel(time=time_index).to_array().values
+            image = satellite_data[UNET_BANDS].isel(time=time_index).to_array().values
 
             for y in range(0, height, stride):
                 for x in range(0, width, stride):
@@ -249,6 +263,11 @@ def load_samples_and_tile_excluding_one_site_date(
                 max_cloud_cover=max_cloud_cover
             ).with_suffix(".nc")
 
+        if not satellite_file.exists():
+            print(f"\tWARNING - no satellite image for site {training_site} (no valid low tide/"
+                  "low cloud image was available). Skipping this site.")
+            continue
+
         satellite_data = utils.load_satellite(filename=satellite_file, chunks=None)
         uav_labels = utils.load_classification(filename=uav_file, chunks=None)
         satellite_data = satellite_data.reindex_like(uav_labels, method="nearest",)
@@ -284,7 +303,7 @@ def load_samples_and_tile_excluding_one_site_date(
                 continue
 
             # Select a fixed, ordered set of bands so every tile has the same channel count
-            image = satellite_data[sentinel2.BANDS].isel(time=time_index).to_array().values
+            image = satellite_data[UNET_BANDS].isel(time=time_index).to_array().values
 
             for y in range(0, height, stride):
                 for x in range(0, width, stride):
@@ -312,6 +331,11 @@ def load_samples_and_tile_excluding_one_site_date(
                     tiles.append(image_tile)
                     labels.append(label_tile)
 
+    if not tiles:
+        raise ValueError(
+            "No tiles were generated - none of the training sites had satellite "
+            "image data available."
+        )
     tiles = numpy.stack(tiles).astype(numpy.float32)
     labels = numpy.stack(labels).astype(numpy.int64)
 
@@ -360,10 +384,7 @@ def randomise_tiles_to_test_and_training(
 
 
 class UNetClassifier(pytorch_lightning.LightningModule):
-    """Pixel-wise (semantic segmentation) classifier using the U-Net backbone from the
-    diffusers library (diffusers.UNet2DModel). The model is a plain classifier, not a
-    diffusion model - the timestep input required by UNet2DModel is fixed to zero and
-    unused."""
+    """Pixel-wise classifier using a pretrained Sentinel-2 UNet++ model."""
 
     def __init__(
         self,
@@ -373,6 +394,9 @@ class UNetClassifier(pytorch_lightning.LightningModule):
         band_mean: list,
         band_std: list,
         learning_rate: float = 1e-4,
+        monitor_class_ids: dict = None,
+        pretrained: bool = True,
+        pretrained_model_repo: str = UNET_PRETRAINED_REPO,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -384,28 +408,100 @@ class UNetClassifier(pytorch_lightning.LightningModule):
             "band_std",
             torch.as_tensor(band_std, dtype=torch.float32).reshape(1, -1, 1, 1),
         )
-        self.unet = diffusers.UNet2DModel(
-            sample_size=tile_size,
+        self.unet = segmentation_models_pytorch.UnetPlusPlus(
+            encoder_name="efficientnet-b4",
+            encoder_weights=None,
             in_channels=in_channels,
-            out_channels=num_classes,
-            layers_per_block=2,
-            block_out_channels=(32, 64, 128),
-            down_block_types=("DownBlock2D", "DownBlock2D", "AttnDownBlock2D"),
-            up_block_types=("AttnUpBlock2D", "UpBlock2D", "UpBlock2D"),
+            classes=num_classes,
+            activation=None,
         )
+        if pretrained:
+            self._load_pretrained_weights(pretrained_model_repo)
         self.loss_function = torch.nn.CrossEntropyLoss(ignore_index=int(utils.UAV_NAN_CLASS))
 
+    def _load_pretrained_weights(self, repo_id: str):
+        checkpoint_file = huggingface_hub.hf_hub_download(
+            repo_id=repo_id,
+            filename="model.pth",
+        )
+        checkpoint = torch.load(checkpoint_file, map_location="cpu", weights_only=False)
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        if not isinstance(state_dict, dict):
+            raise ValueError(f"Unsupported checkpoint format from {repo_id}")
+
+        # The Hugging Face checkpoint has a two-class segmentation head. Keep the
+        # pretrained encoder/decoder and leave this project's class-specific head
+        # randomly initialized.
+        state_dict = {
+            key.removeprefix("model."): value
+            for key, value in state_dict.items()
+            if not key.removeprefix("model.").startswith("segmentation_head.")
+        }
+        missing_keys, unexpected_keys = self.unet.load_state_dict(
+            state_dict, strict=False
+        )
+        unexpected_keys = [
+            key for key in unexpected_keys if not key.startswith("segmentation_head.")
+        ]
+        if unexpected_keys:
+            raise ValueError(
+                f"Unexpected keys in pretrained checkpoint from {repo_id}: "
+                f"{unexpected_keys[:5]}"
+            )
+        if not any(key.startswith("encoder.") for key in state_dict):
+            raise ValueError(
+                f"No UNet++ encoder weights were found in the checkpoint from {repo_id}."
+            )
+        if not any(key.startswith("decoder.") for key in state_dict):
+            raise ValueError(
+                f"No UNet++ decoder weights were found in the checkpoint from {repo_id}."
+            )
+        if not missing_keys:
+            raise ValueError(
+                "The pretrained checkpoint unexpectedly contains the project's "
+                "segmentation head."
+            )
+
     def forward(self, tiles):
-        # UNet2DModel requires a diffusion timestep; unused here so fixed to zero
         tiles = torch.where(torch.isfinite(tiles), tiles, self.band_mean)
         tiles = (tiles - self.band_mean) / self.band_std
-        timesteps = torch.zeros(tiles.shape[0], dtype=torch.long, device=tiles.device)
-        return self.unet(tiles, timesteps).sample
+        return self.unet(tiles)
 
     def training_step(self, batch, batch_index):
         batch_tiles, batch_labels = batch
         loss = self.loss_function(self(batch_tiles), batch_labels)
         self.log("train_loss", loss, prog_bar=True, on_epoch=True, on_step=False, batch_size=batch_tiles.shape[0])
+        return loss
+
+    def _per_class_iou(self, predicted_labels, true_labels):
+        """Per-batch IoU for each class in monitor_class_ids, ignoring UAV_NAN_CLASS
+        pixels. Averaged across batches/epochs via self.log - an approximation of
+        the true epoch-wide IoU (which would need accumulated intersection/union),
+        but sufficient to track whether the classes of interest are improving."""
+        valid = true_labels != int(utils.UAV_NAN_CLASS)
+        ious = {}
+        for class_name, class_id in self.hparams.monitor_class_ids.items():
+            predicted_class = (predicted_labels == class_id) & valid
+            true_class = (true_labels == class_id) & valid
+            union = (predicted_class | true_class).sum()
+            if union == 0:
+                continue
+            ious[class_name] = (predicted_class & true_class).sum().float() / union.float()
+        return ious
+
+    def validation_step(self, batch, batch_index):
+        batch_tiles, batch_labels = batch
+        logits = self(batch_tiles)
+        loss = self.loss_function(logits, batch_labels)
+        self.log("val_loss", loss, prog_bar=True, on_epoch=True, on_step=False, batch_size=batch_tiles.shape[0])
+
+        if self.hparams.monitor_class_ids:
+            predicted_labels = logits.argmax(dim=1)
+            for class_name, iou in self._per_class_iou(predicted_labels, batch_labels).items():
+                self.log(
+                    f"val_iou_{class_name.replace(' ', '_')}", iou,
+                    on_epoch=True, on_step=False, batch_size=batch_tiles.shape[0]
+                )
         return loss
 
     def configure_optimizers(self):
@@ -421,10 +517,24 @@ def train_unet_classifier(
     epochs: int = 20,
     batch_size: int = 8,
     learning_rate: float = 1e-4,
+    val_tiles: numpy.ndarray = None,
+    val_labels: numpy.ndarray = None,
+    monitor_class_ids: dict = None,
+    early_stopping_patience: int = 15,
+    pretrained: bool = True,
+    pretrained_model_repo: str = UNET_PRETRAINED_REPO,
 ):
     """Train a U-Net pixel classifier (see UNetClassifier) with PyTorch Lightning.
     `tiles` is (N, bands, tile_size, tile_size) and `labels` is (N, tile_size,
-    tile_size) of integer class ids, e.g. from load_samples_and_tile."""
+    tile_size) of integer class ids, e.g. from load_samples_and_tile.
+
+    If val_tiles/val_labels are given, validation loss (and per-class IoU for any
+    classes in monitor_class_ids, e.g. {"Seagrass": 1, "Ulva": 5}) is tracked each
+    epoch, early stopping is enabled (monitor="val_loss", patience=
+    early_stopping_patience), and the best checkpoint is selected on val_loss
+    instead of train_loss. epochs then acts as a ceiling - early stopping decides
+    the actual number of epochs run. Without a validation set, behaviour is
+    unchanged from before (fixed epochs, checkpoint on train_loss)."""
 
     print("\tTrain a U-Net Model") # consider caching to disk and loading
     band_mean = numpy.nanmean(tiles, axis=(0, 2, 3))
@@ -438,6 +548,14 @@ def train_unet_classifier(
     )
     data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
+    val_data_loader = None
+    if val_tiles is not None and val_labels is not None:
+        val_dataset = torch.utils.data.TensorDataset(
+            torch.as_tensor(val_tiles, dtype=torch.float32),
+            torch.as_tensor(val_labels, dtype=torch.long),
+        )
+        val_data_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
     model = UNetClassifier(
         in_channels=tiles.shape[1],
         tile_size=tiles.shape[-1],
@@ -445,18 +563,28 @@ def train_unet_classifier(
         band_mean=band_mean.tolist(),
         band_std=band_std.tolist(),
         learning_rate=learning_rate,
+        monitor_class_ids=monitor_class_ids,
+        pretrained=pretrained,
+        pretrained_model_repo=pretrained_model_repo,
     )
 
+    monitor_metric = "val_loss" if val_data_loader is not None else "train_loss"
     checkpoint_callback = pytorch_lightning.callbacks.ModelCheckpoint(
         dirpath=models_path,
-        filename="unet-{epoch:02d}-{train_loss:.4f}",
-        monitor="train_loss",
+        filename="unet-{epoch:02d}-{" + monitor_metric + ":.4f}",
+        monitor=monitor_metric,
         mode="min",
         save_top_k=1,
         save_last=True,
     )
-    trainer = pytorch_lightning.Trainer(max_epochs=epochs, callbacks=[checkpoint_callback])
-    trainer.fit(model, train_dataloaders=data_loader) # fit method can pass a checkpoint
+    callbacks = [checkpoint_callback]
+    if val_data_loader is not None:
+        callbacks.append(pytorch_lightning.callbacks.EarlyStopping(
+            monitor="val_loss", mode="min", patience=early_stopping_patience
+        ))
+
+    trainer = pytorch_lightning.Trainer(max_epochs=epochs, callbacks=callbacks)
+    trainer.fit(model, train_dataloaders=data_loader, val_dataloaders=val_data_loader) # fit method can pass a checkpoint
     best_path = checkpoint_callback.best_model_path
     return model, best_path
 
@@ -765,7 +893,7 @@ def predict_site_for_date_unet(
     time_index = time_index_for_date(data=satellite_data, date=date)
 
     print(f"\tPredict satellite image for date {date}")
-    image = satellite_data[sentinel2.BANDS].isel(time=time_index).to_array().values
+    image = satellite_data[UNET_BANDS].isel(time=time_index).to_array().values
     mean_probabilities = predict_tile_probabilities_unet(
         model=model, image=image, tile_size=tile_size, stride=stride, device=device
     )
@@ -817,7 +945,7 @@ def predict_site_unet(
 
     for time_index in range(len(satellite_data["time"])):
         # Select a fixed, ordered set of bands
-        image = satellite_data[sentinel2.BANDS].isel(time=time_index).to_array().values
+        image = satellite_data[UNET_BANDS].isel(time=time_index).to_array().values
         mean_probabilities = predict_tile_probabilities_unet(
             model=model, image=image, tile_size=tile_size, stride=stride, device=device
         )

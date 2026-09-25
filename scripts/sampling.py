@@ -425,9 +425,10 @@ def sample_site_uav_raster(
     satellite_file = utils.get_satellite_path(site_name=site_name, low_tide_delta_hrs=low_tide_delta_hrs,
                                               low_tide_delta_mins=low_tide_delta_mins, max_cloud_cover=max_cloud_cover)
     if not satellite_file.exists():
-        raise ValueError(
-            f"Missing satellite image for site {site_name}. Try running `get_site_satellite` first. "
-             f"satellite_file: {satellite_file}")
+        print(
+            f"WARNING: Missing satellite image for site {site_name}. Try running "
+             f"`get_site_satellite` first. satellite_file: {satellite_file}")
+        return
     satellite_data = utils.load_satellite(filename=satellite_file)
 
     # Build and save the UAV class raster

@@ -344,6 +344,7 @@ def plot_site_predicted_vs_surveyed_areas(
                 folder_match.group("predict_minutes_only") or folder_match.group("predict_minutes") or 0
             )
             label = (
+                f"sampling={folder_match.group('method_2_threshold')}%, "
                 f"model dt={model_hours * 60 + model_minutes}min "
                 f"cloud<={folder_match.group('model_cloud')}%, "
                 f"predict dt={predict_hours * 60 + predict_minutes}min "
@@ -371,7 +372,7 @@ def plot_site_predicted_vs_surveyed_areas(
                 predicted_colors=combination_colors, shown_legend_groups=shown_legend_groups,
             )
 
-        figure.update_layout(height=400 * len(targets), width=900, title=f"{site_name}: predicted vs surveyed areas")
+        figure.update_layout(height=400 * len(targets), width=1400, title=f"{site_name}: predicted vs surveyed areas")
         output_path = output_directory / f"{site_name}_target_area_timeseries.html"
         figure.write_html(output_path)
         output_paths.append(output_path)
