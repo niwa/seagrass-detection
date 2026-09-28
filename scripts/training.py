@@ -17,6 +17,7 @@ import numpy
 import pathlib
 import matplotlib.pyplot
 import torch
+import diffusers
 import segmentation_models_pytorch
 import huggingface_hub
 import pytorch_lightning
@@ -154,7 +155,8 @@ def load_samples_and_tile(
     and (N, tile_size, tile_size). This is a first-pass implementation - band
     selection/normalisation and smarter tile filtering can be refined later."""
 
-    stride = stride or tile_size
+    if stride is None:
+        stride = tile_size
     tiles = []
     labels = []
     for training_site in training_sites:
@@ -175,8 +177,8 @@ def load_samples_and_tile(
                   "low cloud image was available). Skipping this site.")
             continue
         if not uav_file.exists():
-            raise ValueError(f"\tWARNING - no training raster extracted from the UAV classification for site"
-                             f" {training_site}. Please run extract_training_samples_raster.ipynb.")
+            raise ValueError(f"\tWARNING - no UAV training raster extracted from the UAV classification for site"
+                             f" {training_site}. Please run extract_training_samples_raster.ipynb. {uav_file}")
                     
 
         satellite_data = utils.load_satellite(filename=satellite_file, chunks=None)
@@ -247,7 +249,8 @@ def load_samples_and_tile_excluding_one_site_date(
     get_training_data_across_sites_excluding_one_site_date vs
     get_training_data_across_sites."""
 
-    stride = stride or tile_size
+    if stride is None:
+        stride = tile_size
     tiles = []
     labels = []
     for training_site in training_sites:
@@ -474,13 +477,15 @@ class UNetClassifier(pytorch_lightning.LightningModule):
         return loss
 
     def _per_class_iou(self, predicted_labels, true_labels):
-        """Per-batch IoU for each class in monitor_class_ids, ignoring UAV_NAN_CLASS
-        pixels. Averaged across batches/epochs via self.log - an approximation of
-        the true epoch-wide IoU (which would need accumulated intersection/union),
-        but sufficient to track whether the classes of interest are improving."""
+        """Per-batch IoU for selected classes (or all classes), ignoring masked pixels."""
         valid = true_labels != int(utils.UAV_NAN_CLASS)
+        class_ids = self.hparams.monitor_class_ids
+        if class_ids is None:
+            class_ids = {str(class_id): class_id for class_id in range(self.hparams.num_classes)}
+        else:
+            valid &= torch.isin(true_labels, torch.as_tensor(list(class_ids.values()), device=true_labels.device))
         ious = {}
-        for class_name, class_id in self.hparams.monitor_class_ids.items():
+        for class_name, class_id in class_ids.items():
             predicted_class = (predicted_labels == class_id) & valid
             true_class = (true_labels == class_id) & valid
             union = (predicted_class | true_class).sum()
@@ -492,21 +497,161 @@ class UNetClassifier(pytorch_lightning.LightningModule):
     def validation_step(self, batch, batch_index):
         batch_tiles, batch_labels = batch
         logits = self(batch_tiles)
-        loss = self.loss_function(logits, batch_labels)
-        self.log("val_loss", loss, prog_bar=True, on_epoch=True, on_step=False, batch_size=batch_tiles.shape[0])
+        if self.hparams.monitor_class_ids is not None:
+            selected = torch.isin(
+                batch_labels,
+                torch.as_tensor(list(self.hparams.monitor_class_ids.values()), device=batch_labels.device),
+            )
+            batch_labels = batch_labels.masked_fill(~selected, int(utils.UAV_NAN_CLASS))
+        valid_count = (batch_labels != int(utils.UAV_NAN_CLASS)).sum().item()
+        if not valid_count:
+            return None
 
-        if self.hparams.monitor_class_ids:
-            predicted_labels = logits.argmax(dim=1)
-            for class_name, iou in self._per_class_iou(predicted_labels, batch_labels).items():
-                self.log(
-                    f"val_iou_{class_name.replace(' ', '_')}", iou,
-                    on_epoch=True, on_step=False, batch_size=batch_tiles.shape[0]
-                )
+        loss = self.loss_function(logits, batch_labels)
+        self.log("val_loss", loss, prog_bar=True, on_epoch=True, on_step=False, batch_size=valid_count)
+
+        predicted_labels = logits.argmax(dim=1)
+        for class_name, iou in self._per_class_iou(predicted_labels, batch_labels).items():
+            self.log(
+                f"val_iou_{class_name.replace(' ', '_')}", iou,
+                on_epoch=True, on_step=False, batch_size=valid_count
+            )
         return loss
 
     def configure_optimizers(self):
         # Can hve a learning rate decay - later - more complexity
         return torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
+
+
+class DiffuserUNetClassifier(UNetClassifier):
+    """Pixel classifier using the original diffusers UNet2DModel architecture."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        tile_size: int,
+        num_classes: int,
+        band_mean: list,
+        band_std: list,
+        learning_rate: float = 1e-4,
+        monitor_class_ids: dict = None,
+    ):
+        pytorch_lightning.LightningModule.__init__(self)
+        self.save_hyperparameters()
+        self.register_buffer(
+            "band_mean",
+            torch.as_tensor(band_mean, dtype=torch.float32).reshape(1, -1, 1, 1),
+        )
+        self.register_buffer(
+            "band_std",
+            torch.as_tensor(band_std, dtype=torch.float32).reshape(1, -1, 1, 1),
+        )
+        self.unet = diffusers.UNet2DModel(
+            sample_size=tile_size,
+            in_channels=in_channels,
+            out_channels=num_classes,
+            layers_per_block=2,
+            block_out_channels=(32, 64, 128),
+            down_block_types=("DownBlock2D", "DownBlock2D", "AttnDownBlock2D"),
+            up_block_types=("AttnUpBlock2D", "UpBlock2D", "UpBlock2D"),
+        )
+        self.loss_function = torch.nn.CrossEntropyLoss(ignore_index=int(utils.UAV_NAN_CLASS))
+
+    def forward(self, tiles):
+        tiles = torch.where(torch.isfinite(tiles), tiles, self.band_mean)
+        tiles = (tiles - self.band_mean) / self.band_std
+        timesteps = torch.zeros(tiles.shape[0], dtype=torch.long, device=tiles.device)
+        return self.unet(tiles, timesteps).sample
+
+
+def _train_unet_classifier(
+    tiles: numpy.ndarray,
+    labels: numpy.ndarray,
+    models_path: pathlib.Path,
+    num_classes: int,
+    classifier_type: type,
+    checkpoint_name: str,
+    epochs: int = 20,
+    batch_size: int = 8,
+    learning_rate: float = 1e-4,
+    val_tiles: numpy.ndarray = None,
+    val_labels: numpy.ndarray = None,
+    monitor_class_ids: dict = None,
+    early_stopping_patience: int = 15,
+    pretrained: bool = True,
+    pretrained_model_repo: str = UNET_PRETRAINED_REPO,
+):
+    """Train a U-Net pixel classifier with PyTorch Lightning.
+    `tiles` is (N, bands, tile_size, tile_size) and `labels` is (N, tile_size,
+    tile_size) of integer class ids, e.g. from load_samples_and_tile.
+
+    If val_tiles/val_labels are given, validation loss and per-class IoU are tracked
+    for monitor_class_ids (e.g. {"Seagrass": 1, "Ulva": 5}), or for every non-ignored
+    class when it is None. Training loss always uses every non-ignored class.
+    Early stopping is enabled (monitor="val_loss", patience=
+    early_stopping_patience), and the best checkpoint is selected on val_loss
+    instead of train_loss. epochs then acts as a ceiling - early stopping decides
+    the actual number of epochs run. Without a validation set, training runs
+    for fixed epochs and checkpoints on train_loss."""
+
+    print("\tTrain a U-Net Model") # consider caching to disk and loading
+    band_mean = numpy.nanmean(tiles, axis=(0, 2, 3))
+    band_std = numpy.nanstd(tiles, axis=(0, 2, 3))
+    band_mean = numpy.where(numpy.isfinite(band_mean), band_mean, 0.0)
+    band_std = numpy.where(numpy.isfinite(band_std) & (band_std > 0), band_std, 1.0)
+
+    dataset = torch.utils.data.TensorDataset(
+        torch.as_tensor(tiles, dtype=torch.float32),
+        torch.as_tensor(labels, dtype=torch.long),
+    )
+    data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    val_data_loader = None
+    if val_tiles is not None and val_labels is not None:
+        if monitor_class_ids is not None:
+            selected_ids = list(monitor_class_ids.values())
+            if not selected_ids or not numpy.isin(val_labels, selected_ids).any():
+                raise ValueError("No validation pixels match monitor_class_ids")
+        elif not (val_labels != utils.UAV_NAN_CLASS).any():
+            raise ValueError("No non-ignored validation pixels found")
+        val_dataset = torch.utils.data.TensorDataset(
+            torch.as_tensor(val_tiles, dtype=torch.float32),
+            torch.as_tensor(val_labels, dtype=torch.long),
+        )
+        val_data_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    model_kwargs = dict(
+        in_channels=tiles.shape[1],
+        tile_size=tiles.shape[-1],
+        num_classes=num_classes,
+        band_mean=band_mean.tolist(),
+        band_std=band_std.tolist(),
+        learning_rate=learning_rate,
+        monitor_class_ids=monitor_class_ids,
+    )
+    if classifier_type is UNetClassifier:
+        model_kwargs.update(pretrained=pretrained, pretrained_model_repo=pretrained_model_repo)
+    model = classifier_type(**model_kwargs)
+
+    monitor_metric = "val_loss" if val_data_loader is not None else "train_loss"
+    checkpoint_callback = pytorch_lightning.callbacks.ModelCheckpoint(
+        dirpath=models_path,
+        filename=checkpoint_name + "-{epoch:02d}-{" + monitor_metric + ":.4f}",
+        monitor=monitor_metric,
+        mode="min",
+        save_top_k=1,
+        save_last=True,
+    )
+    callbacks = [checkpoint_callback]
+    if val_data_loader is not None:
+        callbacks.append(pytorch_lightning.callbacks.EarlyStopping(
+            monitor="val_loss", mode="min", patience=early_stopping_patience
+        ))
+
+    trainer = pytorch_lightning.Trainer(max_epochs=epochs, callbacks=callbacks)
+    trainer.fit(model, train_dataloaders=data_loader, val_dataloaders=val_data_loader) # fit method can pass a checkpoint
+    best_path = checkpoint_callback.best_model_path
+    return model, best_path
 
 
 def train_unet_classifier(
@@ -524,69 +669,40 @@ def train_unet_classifier(
     pretrained: bool = True,
     pretrained_model_repo: str = UNET_PRETRAINED_REPO,
 ):
-    """Train a U-Net pixel classifier (see UNetClassifier) with PyTorch Lightning.
-    `tiles` is (N, bands, tile_size, tile_size) and `labels` is (N, tile_size,
-    tile_size) of integer class ids, e.g. from load_samples_and_tile.
-
-    If val_tiles/val_labels are given, validation loss (and per-class IoU for any
-    classes in monitor_class_ids, e.g. {"Seagrass": 1, "Ulva": 5}) is tracked each
-    epoch, early stopping is enabled (monitor="val_loss", patience=
-    early_stopping_patience), and the best checkpoint is selected on val_loss
-    instead of train_loss. epochs then acts as a ceiling - early stopping decides
-    the actual number of epochs run. Without a validation set, behaviour is
-    unchanged from before (fixed epochs, checkpoint on train_loss)."""
-
-    print("\tTrain a U-Net Model") # consider caching to disk and loading
-    band_mean = numpy.nanmean(tiles, axis=(0, 2, 3))
-    band_std = numpy.nanstd(tiles, axis=(0, 2, 3))
-    band_mean = numpy.where(numpy.isfinite(band_mean), band_mean, 0.0)
-    band_std = numpy.where(numpy.isfinite(band_std) & (band_std > 0), band_std, 1.0)
-
-    dataset = torch.utils.data.TensorDataset(
-        torch.as_tensor(tiles, dtype=torch.float32),
-        torch.as_tensor(labels, dtype=torch.long),
-    )
-    data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
-    val_data_loader = None
-    if val_tiles is not None and val_labels is not None:
-        val_dataset = torch.utils.data.TensorDataset(
-            torch.as_tensor(val_tiles, dtype=torch.float32),
-            torch.as_tensor(val_labels, dtype=torch.long),
-        )
-        val_data_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-
-    model = UNetClassifier(
-        in_channels=tiles.shape[1],
-        tile_size=tiles.shape[-1],
-        num_classes=num_classes,
-        band_mean=band_mean.tolist(),
-        band_std=band_std.tolist(),
-        learning_rate=learning_rate,
+    """Train the pretrained UNet++ classifier and return its best checkpoint."""
+    return _train_unet_classifier(
+        tiles, labels, models_path, num_classes,
+        classifier_type=UNetClassifier, checkpoint_name="unet",
+        epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
+        val_tiles=val_tiles, val_labels=val_labels,
         monitor_class_ids=monitor_class_ids,
-        pretrained=pretrained,
-        pretrained_model_repo=pretrained_model_repo,
+        early_stopping_patience=early_stopping_patience,
+        pretrained=pretrained, pretrained_model_repo=pretrained_model_repo,
     )
 
-    monitor_metric = "val_loss" if val_data_loader is not None else "train_loss"
-    checkpoint_callback = pytorch_lightning.callbacks.ModelCheckpoint(
-        dirpath=models_path,
-        filename="unet-{epoch:02d}-{" + monitor_metric + ":.4f}",
-        monitor=monitor_metric,
-        mode="min",
-        save_top_k=1,
-        save_last=True,
-    )
-    callbacks = [checkpoint_callback]
-    if val_data_loader is not None:
-        callbacks.append(pytorch_lightning.callbacks.EarlyStopping(
-            monitor="val_loss", mode="min", patience=early_stopping_patience
-        ))
 
-    trainer = pytorch_lightning.Trainer(max_epochs=epochs, callbacks=callbacks)
-    trainer.fit(model, train_dataloaders=data_loader, val_dataloaders=val_data_loader) # fit method can pass a checkpoint
-    best_path = checkpoint_callback.best_model_path
-    return model, best_path
+def train_diffuser_unet_classifier(
+    tiles: numpy.ndarray,
+    labels: numpy.ndarray,
+    models_path: pathlib.Path,
+    num_classes: int,
+    epochs: int = 20,
+    batch_size: int = 8,
+    learning_rate: float = 1e-4,
+    val_tiles: numpy.ndarray = None,
+    val_labels: numpy.ndarray = None,
+    monitor_class_ids: dict = None,
+    early_stopping_patience: int = 15,
+):
+    """Train the original diffusers UNet from scratch; keep checkpoints separate."""
+    return _train_unet_classifier(
+        tiles, labels, models_path / "diffuser_unet", num_classes,
+        classifier_type=DiffuserUNetClassifier, checkpoint_name="diffuser-unet",
+        epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
+        val_tiles=val_tiles, val_labels=val_labels,
+        monitor_class_ids=monitor_class_ids,
+        early_stopping_patience=early_stopping_patience,
+    )
 
 
 def load_samples(
@@ -828,6 +944,9 @@ def predict_tile_probabilities_unet(
     overlapping regions to reduce blockiness at tile boundaries. Returns a
     (num_classes, height, width) array of mean probabilities."""
 
+    if stride is None:
+        stride = tile_size
+
     num_classes = model.hparams.num_classes
     height, width = image.shape[1], image.shape[2]
 
@@ -869,6 +988,16 @@ def predict_tile_probabilities_unet(
     return probability_sums / numpy.maximum(overlap_counts, 1)
 
 
+def load_unet_classifier(checkpoint_file: pathlib.Path):
+    """Load either UNet++ or the original diffusers UNet checkpoint."""
+    checkpoint = torch.load(checkpoint_file, map_location="cpu", weights_only=False)
+    classifier_type = (
+        UNetClassifier if "pretrained" in checkpoint["hyper_parameters"]
+        else DiffuserUNetClassifier
+    )
+    return classifier_type.load_from_checkpoint(checkpoint_file)
+
+
 def predict_site_for_date_unet(
     test_satellite_file: pathlib.Path,
     polygon_file: pathlib.Path,
@@ -883,7 +1012,7 @@ def predict_site_for_date_unet(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\tLoading U-Net checkpoint from {checkpoint_file}")
-    model = UNetClassifier.load_from_checkpoint(checkpoint_file)
+    model = load_unet_classifier(checkpoint_file)
     model = model.to(device)
     model.eval()
 
@@ -932,7 +1061,7 @@ def predict_site_unet(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\tLoading U-Net checkpoint from {checkpoint_file}")
-    model = UNetClassifier.load_from_checkpoint(checkpoint_file)
+    model = load_unet_classifier(checkpoint_file)
     model = model.to(device)
     model.eval()
 
@@ -1007,7 +1136,7 @@ def predict_samples_unet(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\tLoading U-Net checkpoint from {checkpoint_file}")
-    model = UNetClassifier.load_from_checkpoint(checkpoint_file)
+    model = load_unet_classifier(checkpoint_file)
     model = model.to(device)
     model.eval()
 

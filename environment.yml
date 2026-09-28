@@ -23,6 +23,8 @@ dependencies:
     - seaborn
     - torch
     - diffusers
+    - segmentation-models-pytorch
+    - huggingface-hub
     - pytorch-lightning
     - iterative-stratification
     - pytest

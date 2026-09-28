@@ -16,7 +16,7 @@ import utils
 def plot_model_feature_importance(training_dataframe, model_file):
     """Plot the feature importance of the trained random forest model."""
 
-    plot_filename = model_file.with_name(f"{model_file.stem}_random_forest_feature_importance.png")
+    plot_filename = model_file.with_name("random_forest_feature_importance.png")
     if plot_filename.exists():
         print(f"{plot_filename.name} already exists. Delete if you've updated the "
               "model and want to regenerate")
@@ -26,7 +26,7 @@ def plot_model_feature_importance(training_dataframe, model_file):
             {'Feature': training_dataframe.drop(columns=["satellite_class_id", "uav_class_id", "time"]).columns,
              'Importance': model.feature_importances_})
         importance_df.sort_values(by='Importance', ascending=False).plot(kind='bar', x='Feature', y='Importance')
-        matplotlib.pyplot.savefig(model_file.with_name(f"{model_file.stem}_random_forest_feature_importance.png"), dpi=300)
+        matplotlib.pyplot.savefig(plot_filename, dpi=300)
 
 
 def plot_uav_classes(training_dataframe, uav_labels_file):
@@ -85,7 +85,7 @@ def plot_training_data_class_distribution(training_dataframe, model_file, uav_la
     """Plot the class distribution of the training data."""
 
     # Plot satellite bands for UAV classes
-    plot_filename = model_file.with_name(f"{model_file.stem}_training_uav_class_IDs.png")
+    plot_filename = model_file.with_name("training_uav_class_IDs.png")
     if plot_filename.exists():
         print(f"{plot_filename.name} already exists. Delete if you've updated the model"
               " and want to regenerate")
@@ -95,7 +95,7 @@ def plot_training_data_class_distribution(training_dataframe, model_file, uav_la
                                  uav_labels_file=uav_labels_file)
 
     # Plot satellite bands for the satellite class used for prediction
-    plot_filename = model_file.with_name(f"{model_file.stem}_training_satellite_class_IDs.png")
+    plot_filename = model_file.with_name("training_satellite_class_IDs.png")
     if plot_filename.exists():
         print(f"{plot_filename.name} already exists. Delete if you've updated the model"
               " and want to regenerate")
@@ -286,32 +286,42 @@ def _add_target_traces(
 
 def plot_site_predicted_vs_surveyed_areas(
     data_path: pathlib.Path,
+    survey_date_site_groups: dict,
     targets: list = ("Seagrass", "Ulva", "Gracilaria"),
+    include_rf: bool = True,
+    include_unet: bool = True,
 ):
     """Plot, per site, predicted (across model/prediction parameter combinations) vs
     surveyed UAV target areas over time. Saves one interactive HTML per site, plus a
     composite summary HTML with one subplot per site."""
+    if not include_rf and not include_unet:
+        raise ValueError("At least one of include_rf or include_unet must be enabled")
+
     website_path = data_path / "website"
     uav_areas_path = website_path / "uav_areas"
 
     folder_pattern = re.compile(
-        r"RF_model_10_percent_test_sampling_2_(?P<method_2_threshold>\d+)_percent_"
-        r"low_tide_delta_(?:(?P<model_hours>\d+)hrs(?:_(?P<model_minutes>\d+)mins)?|"
-        r"(?P<model_minutes_only>\d+)mins)_max_cloud_percentage_(?P<model_cloud>\d+)_"
-        r"predict_over_low_tide_delta_(?:(?P<predict_hours>\d+)hrs(?:_(?P<predict_minutes>\d+)mins)?|"
-        r"(?P<predict_minutes_only>\d+)mins)_max_cloud_percentage_(?P<predict_cloud>\d+)"
+        r"(?:(?P<rf>RF)_model_|(?P<unet>UNet)_model_"
+        r"(?P<tile_size>\d+)_(?P<tile_stride>\d+|None)_)"
+        r"(?:_(?P<description>.+))?_10_percent_test__trainsampling_2_(?P<method_2_threshold>\d+)_percent_"
+        r"tide_(?:(?P<model_hours>\d+)hrs(?:_(?P<model_minutes>\d+)mins)?|"
+        r"(?P<model_minutes_only>\d+)mins)_cloud_(?P<model_cloud>\d+)_"
+        r"predict_tide_(?:(?P<predict_hours>\d+)hrs(?:_(?P<predict_minutes>\d+)mins)?|"
+        r"(?P<predict_minutes_only>\d+)mins)_cloud_(?P<predict_cloud>\d+)"
+        r""
     )
 
-    model_folders = [
-        folder for folder in website_path.iterdir()
-        if folder.is_dir() and folder_pattern.fullmatch(folder.name) is not None
-    ]
+    model_folders = []
+    for folder in website_path.iterdir():
+        if folder.is_dir() and (match := folder_pattern.fullmatch(folder.name)) is not None:
+            if (match.group("rf") and include_rf) or (match.group("unet") and include_unet):
+                model_folders.append((folder, match))
     if not model_folders:
         raise FileNotFoundError(f"No model prediction folders found in {website_path}")
 
     site_names = sorted({
         site_folder.name
-        for model_folder in model_folders
+        for model_folder, _ in model_folders
         for site_folder in model_folder.iterdir()
         if site_folder.is_dir()
     })
@@ -323,18 +333,21 @@ def plot_site_predicted_vs_surveyed_areas(
 
     site_data = {}
     for site_name in site_names:
-        surveyed_dataframe = None
+        plot_site_name = survey_date_site_groups.get(site_name, site_name)
+        surveyed_dataframes, predictions = site_data.setdefault(
+            plot_site_name, ([], [])
+        )
         surveyed_csv = uav_areas_path / site_name / "uav_areas.csv"
         if surveyed_csv.exists():
             surveyed_dataframe = pandas.read_csv(surveyed_csv, parse_dates=["date"])
+            surveyed_dataframe["survey_site"] = site_name
+            surveyed_dataframes.append(surveyed_dataframe)
 
-        predictions = []
-        for model_folder in model_folders:
+        for model_folder, folder_match in model_folders:
             info_csv = model_folder / site_name / "info_all_dates.csv"
             if not info_csv.exists():
                 continue
 
-            folder_match = folder_pattern.fullmatch(model_folder.name)
             model_hours = int(folder_match.group("model_hours") or 0)
             model_minutes = int(
                 folder_match.group("model_minutes_only") or folder_match.group("model_minutes") or 0
@@ -343,18 +356,39 @@ def plot_site_predicted_vs_surveyed_areas(
             predict_minutes = int(
                 folder_match.group("predict_minutes_only") or folder_match.group("predict_minutes") or 0
             )
+            model_label = (
+                "RF" if folder_match.group("rf") else
+                f"UNet tile={folder_match.group('tile_size')} stride={folder_match.group('tile_stride')}"
+            )
             label = (
-                f"sampling={folder_match.group('method_2_threshold')}%, "
+                f"{model_label}, sampling={folder_match.group('method_2_threshold')}%, "
                 f"model dt={model_hours * 60 + model_minutes}min "
                 f"cloud<={folder_match.group('model_cloud')}%, "
                 f"predict dt={predict_hours * 60 + predict_minutes}min "
                 f"cloud<={folder_match.group('predict_cloud')}%"
             )
+            if folder_match.group("description"):
+                label = f"{label}, {folder_match.group('description')}"
+            if plot_site_name != site_name:
+                label = f"{site_name}: {label}"
             predictions.append((label, pandas.read_csv(info_csv, parse_dates=["date"])))
 
-        if surveyed_dataframe is None and not predictions:
-            continue
-        site_data[site_name] = (surveyed_dataframe, predictions)
+    site_data = {
+        site_name: (
+            pandas.concat(surveyed_dataframes, ignore_index=True)
+            .sort_values("date")
+            .reset_index(drop=True)
+            if surveyed_dataframes else None,
+            predictions,
+        )
+        for site_name, (surveyed_dataframes, predictions) in site_data.items()
+        if surveyed_dataframes or predictions
+    }
+
+    if not site_data:
+        raise FileNotFoundError(
+            f"No survey areas or prediction timeseries found in {website_path}"
+        )
 
     output_paths = []
 

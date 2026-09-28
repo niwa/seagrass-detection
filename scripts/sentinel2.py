@@ -10,6 +10,7 @@ import leafmap
 import pandas
 import numpy
 import xarray
+from rioxarray.exceptions import NoDataInBounds
 import dotenv
 import os
 import time
@@ -43,7 +44,7 @@ BANDS = [
     "B8A",
     "SCL",
 ]
-RGB_BANDS = ["B04", "B02", "B03"]
+RGB_BANDS = ["B04", "B03", "B02"]
 SCL_TO_IGNORE = [
     1,  # SATURATED_OR_DEFECTIVE
     8,  # CLOUD_MEDIUM_PROBABILITY
@@ -256,29 +257,17 @@ def get_low_tide_no_cloud_images_near_date(
     if number_of_low_tide_dates == 0:
         return data
 
-    # keep only values with less cloud cover than the specified percentatge
-    cloud_cover_percentage = (  # mean = % as mask is zeros and ones
-        100
-        * data["SCL"].isin(SCL_TO_IGNORE).mean(dim=["x", "y"]).compute()
-    )
-    data = data.where(
-        cloud_cover_percentage <= max_cloud_cover,
-        drop=True,
-    )
+    data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
     print(
         f"\tNo cloud tiles: {len(data['time'])} from the low tide tiles of "
         f"{number_of_low_tide_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
-        f"Kept {cloud_cover_percentage.data <= max_cloud_cover}"
+        f"Kept {kept.data}"
     )
 
-    # Harmonize any post-2022 data - TODO - do for float32 too
-    for index in range(len(data["time"])):
-        date = pandas.Timestamp(
-            data["time"].isel(time=index).values
-        ).tz_localize("UTC").to_pydatetime()
-        data_i = data.isel(time=index)
-        harmonize_post_2022(data=data_i, date=date)
-        utils.write_netcdf_conventions_in_place(data_i)
+    if len(data["time"]) == 0:
+        return data
+    data = harmonize_post_2022(data)
+    utils.write_netcdf_conventions_in_place(data)
 
     return data
 
@@ -291,30 +280,31 @@ def get_low_tide_no_cloud_images_in_year(
                                        low_tide_delta_mins=low_tide_delta_mins)
     number_of_low_tide_dates = len(data["time"])
 
-    # keep only values with less cloud cover than the specified percentatge
-    cloud_cover_percentage = (
-        100
-        * data["SCL"].isin(SCL_TO_IGNORE).mean(dim=["x", "y"]).compute()
-    )
-    data = data.where(
-        cloud_cover_percentage <= max_cloud_cover,
-        drop=True,
-    )
+    data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
     print(
         f"\tNo cloud tiles: {len(data['time'])} from the low tide tiles of"
-        f" {number_of_low_tide_dates}"
+        f" {number_of_low_tide_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
+        f"Kept {kept.data}"
     )
 
-    # Harmonize any post-2022 data - TODO - do for float32 too
-    for index in range(len(data["time"])):
-        date = pandas.Timestamp(
-            data["time"].isel(time=index).values
-        ).tz_localize("UTC").to_pydatetime()
-        data_i = data.isel(time=index)
-        harmonize_post_2022(data=data_i, date=date)
-        utils.write_netcdf_conventions_in_place(data_i)
+    if len(data["time"]) == 0:
+        return data
+    data = harmonize_post_2022(data)
+    utils.write_netcdf_conventions_in_place(data)
 
     return data
+
+
+def filter_valid_low_cloud_dates(data, max_cloud_cover):
+    """Keep dates with site RGB coverage and acceptable cloud over those pixels."""
+    valid = xarray.concat(
+        [data[band].notnull() & (data[band] > 0) for band in RGB_BANDS], dim="rgb_band"
+    ).all(dim="rgb_band")
+    valid_count = valid.sum(dim=["x", "y"])
+    cloud_count = (data["SCL"].isin(SCL_TO_IGNORE) & valid).sum(dim=["x", "y"])
+    cloud_percentage = (100 * cloud_count / valid_count.where(valid_count > 0)).compute()
+    kept = ((valid_count > 0) & (cloud_percentage <= max_cloud_cover)).compute()
+    return data.isel(time=kept.values), cloud_percentage, kept
 
 
 def get_low_tide(item, lat, lon):
@@ -403,35 +393,54 @@ def check_low_tide(item, lat, lon, low_tide_delta_hrs: int, low_tide_delta_mins:
     return low_tide
 
 
-def harmonize_post_2022(data, date, debug: bool = False):
-
-    if numpy.datetime64(HARMONIZE_DATE) < numpy.datetime64(date):
-        for band in BANDS:
-            if debug:
-                print(f"\t\tHarmonizing date {date}")
-            data[band] = (
-                data[band].clip(min=1000) - BAND_OFFSET_POST_2022_01_25
-            )
+def harmonize_post_2022(data):
+    """Bring post-baseline reflectance bands onto the pre-2022 scale."""
+    post_baseline = data["time"] > numpy.datetime64(HARMONIZE_DATE)
+    for band in BANDS:
+        if band == "SCL":
+            continue
+        reflectance = data[band]
+        data[band] = xarray.where(
+            post_baseline & reflectance.notnull() & (reflectance != 0),
+            reflectance.clip(min=BAND_OFFSET_POST_2022_01_25) - BAND_OFFSET_POST_2022_01_25,
+            reflectance,
+        )
     return data
 
 
 def get_satellite_info(geometry, date_YYMMDD):
+    """Return item IDs and site-specific red, green, blue rescale lists for a date."""
     items = get_satellite_for_date(geometry=geometry, date_YYMMDD=date_YYMMDD)
-
-    tile_id = ""; percentage_2 = ""; percentage_98 = ""
+    print(date_YYMMDD)
+    tile_ids = []
+    rescales_dict = {band: [] for band in RGB_BANDS}
+    geometry_WSG = geometry.buffer(S2_RESOLUTION).to_crs(utils.CRS_WSG)
     for item in items:
-        tile_id += f"{item.id}, "
-        stats=leafmap.stac_stats(collection=COLLECTION,
-                                 item=item.id,
-                                 titiler_endpoint="pc",
-                                 assets=RGB_BANDS)
-        percentage_2_i = []; percentage_98_i = []
-        for key, value in stats.items():
-            percentage_2_i.append(value['percentile_2'])
-            percentage_98_i.append(value['percentile_98'])
-        percentage_2_i = numpy.array(percentage_2_i).mean()
-        percentage_98_i = numpy.array(percentage_98_i).mean()
-        percentage_2 += f"{round(percentage_2_i)}, "
-        percentage_98 += f"{round(percentage_98_i)}, "
-    return tile_id, percentage_2, percentage_98
+        data = odc.stac.load(
+            [item], bbox=geometry_WSG.total_bounds, bands=RGB_BANDS + ["SCL"],
+            resolution=S2_RESOLUTION, dtype="uint16", nodata=0,
+            patch_url=planetary_computer.sign,
+        )
+        try:
+            data = data.rio.clip(
+                geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
+            )
+        except NoDataInBounds:
+            continue
+        valid = ~data["SCL"].isin(SCL_TO_IGNORE)
+        item_rescales = {}
+        for band in RGB_BANDS:
+            pixels = data[band].where(valid).values
+            pixels = pixels[numpy.isfinite(pixels) & (pixels > 0)]
+            if not pixels.size:
+                break
+            low, high = numpy.percentile(pixels, [2, 98])
+            item_rescales[band] = (float(low), float(high))
+        else:
+            tile_ids.append(item.id)
+            for band in RGB_BANDS:
+                rescales_dict[band].append(item_rescales[band])
+    if not tile_ids:
+        raise ValueError(f"No satellite items with valid RGB pixels at this site on {date_YYMMDD}")
+    return tile_ids, rescales_dict
             
