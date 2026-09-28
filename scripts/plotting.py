@@ -301,14 +301,18 @@ def plot_site_predicted_vs_surveyed_areas(
     uav_areas_path = website_path / "uav_areas"
 
     folder_pattern = re.compile(
-        r"(?:(?P<rf>RF)_model_|(?P<unet>UNet)_model_"
-        r"(?P<tile_size>\d+)_(?P<tile_stride>\d+|None)_)"
-        r"(?:_(?P<description>.+))?_10_percent_test__trainsampling_2_(?P<method_2_threshold>\d+)_percent_"
-        r"tide_(?:(?P<model_hours>\d+)hrs(?:_(?P<model_minutes>\d+)mins)?|"
-        r"(?P<model_minutes_only>\d+)mins)_cloud_(?P<model_cloud>\d+)_"
-        r"predict_tide_(?:(?P<predict_hours>\d+)hrs(?:_(?P<predict_minutes>\d+)mins)?|"
-        r"(?P<predict_minutes_only>\d+)mins)_cloud_(?P<predict_cloud>\d+)"
-        r""
+        r"(?:(?P<rf>RF)_model_(?P<rf_description>.*?)|"
+        r"(?P<unet>UNet)_model_(?P<tile_size>\d+)_(?P<tile_stride>\d+|None)"
+        r"(?:_(?P<unet_description>.*?))?)"
+        r"_10_percent_test_train_sampling_2_"
+        r"(?P<method_2_threshold>\d+)_percent_"
+        r"tide_"
+        r"(?:(?P<model_hours>\d+)hrs(?:_(?P<model_minutes>\d+)mins)?|"
+        r"(?P<model_minutes_only>\d+)mins)_cloud_"
+        r"(?P<model_cloud>\d+)_predict_tide_"
+        r"(?:(?P<predict_hours>\d+)hrs(?:_(?P<predict_minutes>\d+)mins)?|"
+        r"(?P<predict_minutes_only>\d+)mins)_cloud_"
+        r"(?P<predict_cloud>\d+)(?:_(?P<suffix_description>.+))?"
     )
 
     model_folders = []
@@ -367,8 +371,13 @@ def plot_site_predicted_vs_surveyed_areas(
                 f"predict dt={predict_hours * 60 + predict_minutes}min "
                 f"cloud<={folder_match.group('predict_cloud')}%"
             )
-            if folder_match.group("description"):
-                label = f"{label}, {folder_match.group('description')}"
+            descriptions = [
+                folder_match.group(name)
+                for name in ("rf_description", "unet_description", "suffix_description")
+                if folder_match.group(name)
+            ]
+            if descriptions:
+                label = f"{label}, {' '.join(descriptions)}"
             if plot_site_name != site_name:
                 label = f"{site_name}: {label}"
             predictions.append((label, pandas.read_csv(info_csv, parse_dates=["date"])))
