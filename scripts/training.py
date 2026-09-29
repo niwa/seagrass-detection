@@ -537,7 +537,15 @@ class DiffuserUNetClassifier(UNetClassifier):
         monitor_class_ids: dict = None,
     ):
         pytorch_lightning.LightningModule.__init__(self)
-        self.save_hyperparameters()
+        self.save_hyperparameters({
+            "in_channels": in_channels,
+            "tile_size": tile_size,
+            "num_classes": num_classes,
+            "band_mean": band_mean,
+            "band_std": band_std,
+            "learning_rate": learning_rate,
+            "monitor_class_ids": monitor_class_ids,
+        })
         self.register_buffer(
             "band_mean",
             torch.as_tensor(band_mean, dtype=torch.float32).reshape(1, -1, 1, 1),
