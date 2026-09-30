@@ -189,15 +189,6 @@ def uav_class_raster_from_images_method_2(satellite_data, uav_data, labels, thre
     uav_data, upsample_rate = align_fine_grid_to_coarse_grid(
         fine_grid=uav_data, coarse_grid=satellite_data)
 
-    # Ensure exactly the same values for the satellite coordinates
-    # - as observed e-10 differences in coordinate value spacing
-    satellite_data = satellite_data.reindex_like(
-            uav_data.coarsen(
-                x=upsample_rate, y=upsample_rate, boundary="trim"
-                ).count(),
-            method="nearest",
-        )
-
     class_raster = xarray.full_like(
         uav_data.coarsen(x=upsample_rate, y=upsample_rate, boundary="trim").count(),
         fill_value=numpy.nan,

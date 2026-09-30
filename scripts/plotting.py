@@ -145,16 +145,16 @@ def plot_validation_confusion_matrices(
     sampling_folder = utils.get_samples_folder(sample_method="sampling_2", method_2_threshold=method_2_threshold)
 
     folder_pattern = re.compile(
-        r"low_tide_delta_(?:(?P<hours>\d+)hrs(?:_(?P<minutes>\d+)mins)?|"
-        r"(?P<minutes_only>\d+)mins)_max_cloud_percentage_(?P<cloud_percentage>\d+)"
+        r"tide_(?:(?P<hours>\d+)hrs(?:_(?P<minutes>\d+)mins)?|"
+        r"(?P<minutes_only>\d+)mins)_cloud_(?P<cloud_percentage>\d+)"
     )
     confusion_matrices = {}
     tide_delta_labels = {}
 
     for image_path in validation_path.glob(
-        f"*/{sampling_folder}/{model_validation_label}*_confusion_matrix.png"
+        f"*/{sampling_folder}/{model_validation_label}/confusion_matrix.png"
     ):
-        folder_name = image_path.parent.parent.name
+        folder_name = image_path.parent.parent.parent.name
         folder_match = folder_pattern.fullmatch(folder_name)
         if folder_match is None:
             continue
@@ -180,7 +180,7 @@ def plot_validation_confusion_matrices(
 
     if not confusion_matrices:
         raise FileNotFoundError(
-            f"No {model_validation_label}*_confusion_matrix.png files found in "
+            f"No {model_validation_label}/confusion_matrix.png files found in "
             f"{validation_path}/*/{sampling_folder}"
         )
 
@@ -301,10 +301,11 @@ def plot_site_predicted_vs_surveyed_areas(
     uav_areas_path = website_path / "uav_areas"
 
     folder_pattern = re.compile(
-        r"(?:(?P<rf>RF)_model_(?P<rf_description>.*?)|"
-        r"(?P<unet>UNet)_model_(?P<tile_size>\d+)_(?P<tile_stride>\d+|None)"
-        r"(?:_(?P<unet_description>.*?))?)"
-        r"_10_percent_test_train_sampling_2_"
+        r"(?:(?P<rf>RF)|(?P<unet>UN))_model_"
+        r"(?P<model_description>.*?_10_percent_test)"
+        r"(?(rf)_train|_\d+_epochs_(?P<tile_size>\d+)_tiling_"
+        r"(?P<tile_stride>\d+)_stride_(?P<unet_description>.*?)_train)"
+        r"_sampling_2_"
         r"(?P<method_2_threshold>\d+)_percent_"
         r"tide_"
         r"(?:(?P<model_hours>\d+)hrs(?:_(?P<model_minutes>\d+)mins)?|"
@@ -320,6 +321,7 @@ def plot_site_predicted_vs_surveyed_areas(
         if folder.is_dir() and (match := folder_pattern.fullmatch(folder.name)) is not None:
             if (match.group("rf") and include_rf) or (match.group("unet") and include_unet):
                 model_folders.append((folder, match))
+                print(f"Found model folder: {folder}")
     if not model_folders:
         raise FileNotFoundError(f"No model prediction folders found in {website_path}")
 
@@ -373,7 +375,7 @@ def plot_site_predicted_vs_surveyed_areas(
             )
             descriptions = [
                 folder_match.group(name)
-                for name in ("rf_description", "unet_description", "suffix_description")
+                for name in ("model_description", "unet_description", "suffix_description")
                 if folder_match.group(name)
             ]
             if descriptions:
@@ -415,7 +417,7 @@ def plot_site_predicted_vs_surveyed_areas(
                 predicted_colors=combination_colors, shown_legend_groups=shown_legend_groups,
             )
 
-        figure.update_layout(height=400 * len(targets), width=1400, title=f"{site_name}: predicted vs surveyed areas")
+        figure.update_layout(height=400 * len(targets), width=2800, title=f"{site_name}: predicted vs surveyed areas")
         output_path = output_directory / f"{site_name}_target_area_timeseries.html"
         figure.write_html(output_path)
         output_paths.append(output_path)

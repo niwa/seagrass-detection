@@ -197,7 +197,7 @@ def load_samples_and_tile(
 
         for time_index in range(len(satellite_data["time"])):
             # Select a fixed, ordered set of bands so every tile has the same channel count
-            image = satellite_data[UNET_BANDS].isel(time=time_index).to_array().values
+            image = satellite_data[sentinel2.BANDS].isel(time=time_index).to_array().values # UNET_BANDS
 
             for y in range(0, height, stride):
                 for x in range(0, width, stride):
@@ -306,7 +306,7 @@ def load_samples_and_tile_excluding_one_site_date(
                 continue
 
             # Select a fixed, ordered set of bands so every tile has the same channel count
-            image = satellite_data[UNET_BANDS].isel(time=time_index).to_array().values
+            image = satellite_data[sentinel2.BANDS].isel(time=time_index).to_array().values # UNET_BANDS
 
             for y in range(0, height, stride):
                 for x in range(0, width, stride):
@@ -814,11 +814,20 @@ def map_satellite_ids_into_labels_array(
     uav_classes_to_ignore: dict,
     satellite_classes: dict,
     satellite_from_uav_classes: dict,
+    scl_array: numpy.ndarray = None,
+    drop_scl_classes_to_ignore: bool = False,
 ) -> numpy.ndarray:
     """Map UAV class IDs in an array to satellite class IDs.
 
-    Ignored UAV classes are set to utils.UAV_NAN_CLASS. The input array is not modified.
+    Ignored UAV classes and, optionally, SCL_TO_IGNORE pixels are set to
+    utils.UAV_NAN_CLASS. The input arrays are not modified.
     """
+
+    if drop_scl_classes_to_ignore:
+        if scl_array is None:
+            raise ValueError("scl_array is required when dropping ignored SCL classes")
+        if numpy.shape(scl_array) != numpy.shape(labels_array):
+            raise ValueError("scl_array must have the same shape as labels_array")
 
     uav_training_labels = (
         pandas.read_csv(uav_labels_file, sep="\t", header=None, names=["Value", "Key"])
@@ -841,6 +850,11 @@ def map_satellite_ids_into_labels_array(
         ]
         satellite_labels[numpy.isin(source_labels, class_ids_to_map)] = (
             satellite_classes[satellite_class_name]
+        )
+
+    if drop_scl_classes_to_ignore:
+        satellite_labels[numpy.isin(scl_array, sentinel2.SCL_TO_IGNORE)] = (
+            utils.UAV_NAN_CLASS
         )
 
     return satellite_labels
@@ -1006,6 +1020,19 @@ def load_unet_classifier(checkpoint_file: pathlib.Path):
     return classifier_type.load_from_checkpoint(checkpoint_file)
 
 
+def _clip_unet_predictions_to_site(predictions, site_geometry):
+    """Clip class predictions and represent exterior pixels as nodata, not class 0."""
+    predictions.rio.write_crs(input_crs=utils.CRS_NZTM, inplace=True)
+    predictions.rio.write_nodata(int(utils.UAV_NAN_CLASS), inplace=True)
+    predictions = predictions.rio.clip(
+        site_geometry,
+        all_touched=True,
+        drop=True,
+    )
+    predictions.rio.write_nodata(int(utils.UAV_NAN_CLASS), inplace=True)
+    return predictions
+
+
 def predict_site_for_date_unet(
     test_satellite_file: pathlib.Path,
     polygon_file: pathlib.Path,
@@ -1030,7 +1057,7 @@ def predict_site_for_date_unet(
     time_index = time_index_for_date(data=satellite_data, date=date)
 
     print(f"\tPredict satellite image for date {date}")
-    image = satellite_data[UNET_BANDS].isel(time=time_index).to_array().values
+    image = satellite_data[sentinel2.BANDS].isel(time=time_index).to_array().values # UNET_BANDS
     mean_probabilities = predict_tile_probabilities_unet(
         model=model, image=image, tile_size=tile_size, stride=stride, device=device
     )
@@ -1046,12 +1073,7 @@ def predict_site_for_date_unet(
         dims=["time", "y", "x"],
     )
 
-    predictions.rio.write_crs(input_crs=utils.CRS_NZTM, inplace=True)
-    predictions = predictions.rio.clip(
-        uav_polygon.geometry, all_touched=True, drop=True
-    )
-
-    return predictions
+    return _clip_unet_predictions_to_site(predictions, uav_polygon.geometry)
 
 
 def predict_site_unet(
@@ -1082,7 +1104,7 @@ def predict_site_unet(
 
     for time_index in range(len(satellite_data["time"])):
         # Select a fixed, ordered set of bands
-        image = satellite_data[UNET_BANDS].isel(time=time_index).to_array().values
+        image = satellite_data[sentinel2.BANDS].isel(time=time_index).to_array().values # UNET_BANDS
         mean_probabilities = predict_tile_probabilities_unet(
             model=model, image=image, tile_size=tile_size, stride=stride, device=device
         )
@@ -1098,9 +1120,8 @@ def predict_site_unet(
             },
             dims=["time", "y", "x"],
         )
-        predictions_da.rio.write_crs(input_crs=utils.CRS_NZTM, inplace=True)
-        predictions_da = predictions_da.rio.clip(
-            uav_polygon.geometry, all_touched=True, drop=True
+        predictions_da = _clip_unet_predictions_to_site(
+            predictions_da, uav_polygon.geometry
         )
 
         predictions_list.append(predictions_da)
@@ -1265,6 +1286,7 @@ def extract_truth_and_predictions(
         ~numpy.isnan(predictions)
         & ~numpy.isnan(truth)
         & (truth != utils.UAV_NAN_CLASS)
+        & (predictions != utils.UAV_NAN_CLASS)
     )
 
     return truth[mask], predictions[mask]
