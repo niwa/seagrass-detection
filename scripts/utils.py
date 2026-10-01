@@ -82,12 +82,22 @@ def get_site_polygon_path(site_name: str):
     return data_path / "site_polygons" / f"{site_name}_polygon.gpkg"
 
 
-def get_satellite_path(site_name: str, low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int):
-    """Get the path to the satellite file. Low_tide_delta in hrs, and max_cloud_cover
-    as a percentage"""
+def get_training_satellite_path(site_name: str, low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int,
+                               filtered: bool = False):
+    """Get the path to the satellite file matched to the UAV survey dates.
+    Low_tide_delta in hrs, and max_cloud_cover as a percentage. Set filtered=True to
+    use the separate satellite_images_filtered folder for imagery that has had the
+    band quality anomaly filter applied (see sentinel2.flag_anomalous_band_dates),
+    keeping it distinct from earlier unfiltered downloads used by existing
+    models/predictions."""
     data_path = get_data_path()
-    satellite_path = data_path / "satellite_images" / f"tide_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_cloud_{max_cloud_cover}"
-    satellite_path.mkdir(exist_ok=True)
+    folder_name = "satellite_images_filtered" if filtered else "satellite_images"
+    satellite_path = (
+        data_path / "training"
+        / f"tide_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_cloud_{max_cloud_cover}"
+        / folder_name
+    )
+    satellite_path.mkdir(exist_ok=True, parents=True)
     return satellite_path / f"{site_name}_sentinel-2.nc"
 
 
@@ -145,7 +155,16 @@ def get_prediction_path(sample_method: str, method_2_threshold: float,
     return prediction_path, satellite_path
 
 def get_low_tide_max_cloud_name(low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int):
+    if low_tide_delta_hrs is None and low_tide_delta_mins is None:
+        return f"cloud_{max_cloud_cover}"
     return f"tide_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_cloud_{max_cloud_cover}"
+
+
+def get_band_quality_baseline_path():
+    """Path to the cached per-site, per-band reflectance baseline (median/MAD across
+    dates), computed once from a clean tide/cloud subset and reused to flag anomalous
+    satellite dates before inference (see sentinel2.compute_band_quality_baseline)."""
+    return get_data_path() / "band_quality_baseline.csv"
 
 
 def create_data_folders():
@@ -155,8 +174,6 @@ def create_data_folders():
     data_path = get_data_path()
 
     (data_path / "site_polygons").mkdir(exist_ok=True)
-
-    (data_path / "satellite_images").mkdir(exist_ok=True, parents=True)
 
     (data_path / "training").mkdir(exist_ok=True, parents=True)
 

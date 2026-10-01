@@ -248,30 +248,36 @@ def get_site_satellite(
     low_tide_delta_mins: int,
     uav_folder: pathlib.Path,
     max_cloud_cover: float,
+    apply_anomaly_filter: bool = True,
+    n_mad: float = 3.0,
 ):
-    """Given a site download the corresponding satellite data around low tide with low cloud cover."""
+    """Given a site download the corresponding satellite data around low tide with low cloud cover.
+    When apply_anomaly_filter is True (default), the band quality anomaly filter (see
+    sentinel2.flag_anomalous_band_dates) is applied and the result is saved under the
+    separate satellite_images_filtered folder, so it doesn't overwrite earlier
+    unfiltered downloads used by existing models/predictions."""
 
     print(f"Site {site_name}")
     uav_file = uav_folder / f"{site_name}_classified.tif"
-    satellite_file = utils.get_satellite_path(site_name=site_name, low_tide_delta_hrs=low_tide_delta_hrs,
-                                              low_tide_delta_mins=low_tide_delta_mins, max_cloud_cover=max_cloud_cover)
+    satellite_file = utils.get_training_satellite_path(site_name=site_name, low_tide_delta_hrs=low_tide_delta_hrs,
+                                              low_tide_delta_mins=low_tide_delta_mins, max_cloud_cover=max_cloud_cover,
+                                              filtered=apply_anomaly_filter)
     if satellite_file.exists():
         print("\tSatellite file already exists")
         return
-    
-    # load classified UAV - ensure is to nztm
-    if not uav_file.exists():
-        print("\tWARNING - no classified image")
-        raise ValueError(f"Missing classified image for site {site_name}")
-    else:
-        uav_data = utils.load_classification(
-            filename=uav_file,
-            chunks=True
-        )
         
     # create or load area polygon
     polygon_file = utils.get_site_polygon_path(site_name)
     if not polygon_file.exists():
+         # load classified UAV - ensure is to nztm
+        if not uav_file.exists():
+            print("\tWARNING - no classified image")
+            raise ValueError(f"Missing classified image for site {site_name}")
+        else:
+            uav_data = utils.load_classification(
+                filename=uav_file,
+                chunks=True
+            )
         print("\tsave polygon of the site")
         coarsen_ratio = max(numpy.ceil(sentinel2.S2_RESOLUTION / abs(numpy.array(uav_data.rio.resolution()))).astype(int))
         uav_polygon = utils.mask_to_polygons(uav_data.notnull(), coarsen_ratio=coarsen_ratio)
@@ -290,9 +296,11 @@ def get_site_satellite(
         low_tide_search_days=lowtide_search_range,
         low_tide_delta_hrs=low_tide_delta_hrs,
         low_tide_delta_mins=low_tide_delta_mins,
+        apply_anomaly_filter=apply_anomaly_filter,
+        n_mad=n_mad,
     )
     if len(satellite_data['time']) == 0:
-        print("Warning: No satellite data without cloud. Ignore")
+        print("Warning: No satellite data within the specified low tide and cloud cover and anomaly filter constraints. Ignore")
     else:
         utils.write_netcdf_conventions_in_place(satellite_data)
         satellite_data = satellite_data.rio.reproject(utils.CRS_NZTM)
@@ -310,8 +318,11 @@ def sample_site(
     low_tide_delta_mins: int,
     sample_method: str,
     method_2_threshold: float = None,
+    filtered: bool = False,
 ):
-    """Given a site extract training data."""
+    """Given a site extract training data. Set filtered=True to read from the
+    satellite_images_filtered folder (see utils.get_training_satellite_path) if
+    get_site_satellite was run with apply_anomaly_filter=True."""
 
     print(f"Site {site_name}")
     training_labels = pandas.read_csv(
@@ -330,9 +341,9 @@ def sample_site(
         )
 
     # get or load low tide satellite with no cloud
-    satellite_file = utils.get_satellite_path(site_name=site_name, low_tide_delta_hrs=low_tide_delta_hrs,
+    satellite_file = utils.get_training_satellite_path(site_name=site_name, low_tide_delta_hrs=low_tide_delta_hrs,
                                               low_tide_delta_mins=low_tide_delta_mins,
-                                              max_cloud_cover=max_cloud_cover)
+                                              max_cloud_cover=max_cloud_cover, filtered=filtered)
     if not satellite_file.exists():
         print(f"\tWARNING - satellite image for site {site_name} - either it's not yet downloaded or"
               " there is no suitable low cloud / low tide satellite image. Ignoring this site."
@@ -413,7 +424,7 @@ def sample_site_uav_raster(
         )
 
     # get low tide satellite with no cloud
-    satellite_file = utils.get_satellite_path(site_name=site_name, low_tide_delta_hrs=low_tide_delta_hrs,
+    satellite_file = utils.get_training_satellite_path(site_name=site_name, low_tide_delta_hrs=low_tide_delta_hrs,
                                               low_tide_delta_mins=low_tide_delta_mins, max_cloud_cover=max_cloud_cover)
     if not satellite_file.exists():
         print(
@@ -485,7 +496,7 @@ def get_satellite_sample_site(
         uav_polygon = geopandas.read_file(polygon_file)
 
     # get or load low tide satellite with no cloud
-    satellite_file = utils.get_satellite_path(site_name=site_name)
+    satellite_file = utils.get_training_satellite_path(site_name=site_name)
     if not satellite_file.exists():
         print("\tSave satellite image of the site around lowtide without cloud")
     

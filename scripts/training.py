@@ -147,13 +147,16 @@ def load_samples_and_tile(
     method_2_threshold: float,
     tile_size: int = 64,
     stride: int = None, verbose: bool = False,
+    filtered: bool = False,
 ) -> tuple:
     """Load the satellite imagery and UAV classification for each site, align the UAV
     classification onto the satellite grid (mode per pixel), then cut both into fixed
     size square tiles for U-Net training. Tiles that are entirely nodata are dropped.
     Returns (tiles, labels) as numpy arrays of shape (N, bands, tile_size, tile_size)
-    and (N, tile_size, tile_size). This is a first-pass implementation - band
-    selection/normalisation and smarter tile filtering can be refined later."""
+    and (N, tile_size, tile_size). Set filtered=True to read from the
+    satellite_images_filtered folder (see utils.get_training_satellite_path). This is
+    a first-pass implementation - band selection/normalisation and smarter tile
+    filtering can be refined later."""
 
     if stride is None:
         stride = tile_size
@@ -162,9 +165,9 @@ def load_samples_and_tile(
     for training_site in training_sites:
         if verbose:
             print(f"Load and tile site: {training_site}")
-        satellite_file = utils.get_satellite_path(
+        satellite_file = utils.get_training_satellite_path(
             site_name=training_site, low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
-            max_cloud_cover=max_cloud_cover
+            max_cloud_cover=max_cloud_cover, filtered=filtered
         )
         uav_file = utils.get_training_data_path(
                 site_name=training_site, sample_method="sampling_2", method_2_threshold=method_2_threshold,
@@ -242,6 +245,7 @@ def load_samples_and_tile_excluding_one_site_date(
     tile_size: int = 64,
     stride: int = None,
     verbose: bool = False,
+    filtered: bool = False,
 ) -> tuple:
     """Same as load_samples_and_tile, but exclude the satellite image for test_site at
     test_date (e.g. so it can be held out for testing). Mirrors how
@@ -256,9 +260,9 @@ def load_samples_and_tile_excluding_one_site_date(
     for training_site in training_sites:
         if verbose:
             print(f"Load and tile site: {training_site}")
-        satellite_file = utils.get_satellite_path(
+        satellite_file = utils.get_training_satellite_path(
             site_name=training_site, low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
-            max_cloud_cover=max_cloud_cover
+            max_cloud_cover=max_cloud_cover, filtered=filtered
         )
         uav_file = utils.get_training_data_path(
                 site_name=training_site, sample_method="sampling_2", method_2_threshold=method_2_threshold,
