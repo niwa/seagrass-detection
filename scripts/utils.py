@@ -10,6 +10,7 @@ import rioxarray
 import pandas
 
 CRS_WSG = 4326
+CRS_NZGD49 = 4272
 CRS_NZTM = 2193
 
 UAV_NAN_CLASS = -128
@@ -44,13 +45,16 @@ def format_low_tide_delta(low_tide_delta_hrs: int, low_tide_delta_mins: int) -> 
 
 
 def get_samples_path(sample_method: str, method_2_threshold: float, low_tide_delta_hrs: int,
-                     low_tide_delta_mins: int, max_cloud_cover: int):
+                     low_tide_delta_mins: int, max_cloud_cover: int,
+                     filtered: bool = False):
     """Get the path to the sample folder for a given sampling method."""
 
     sample_folder = get_samples_folder(sample_method, method_2_threshold)
 
     data_path = get_data_path()
-    samples_path = data_path / "training" / f"tide_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_cloud_{max_cloud_cover}" / sample_folder
+    samples_path = data_path / "training" / get_low_tide_max_cloud_name(
+        low_tide_delta_hrs, low_tide_delta_mins, max_cloud_cover, filtered=filtered
+    ) / sample_folder
     samples_path.mkdir(exist_ok=True, parents=True)
     return samples_path
 
@@ -68,11 +72,13 @@ def get_spectral_plots_path(sample_method: str, method_2_threshold: float, low_t
 
 
 def get_samples_summary_file_path(sample_method: str, method_2_threshold: float, low_tide_delta_hrs: int,
-                                   low_tide_delta_mins: int, max_cloud_cover: int):
+                                   low_tide_delta_mins: int, max_cloud_cover: int,
+                                   filtered: bool = False):
     """Get the path to the sample summary file for a given sampling method."""
 
     sample_folder_path = get_samples_path(sample_method, method_2_threshold,
-                                          low_tide_delta_hrs, low_tide_delta_mins, max_cloud_cover)
+                                          low_tide_delta_hrs, low_tide_delta_mins, max_cloud_cover,
+                                          filtered=filtered)
     return sample_folder_path / "samples_summary.csv"
 
 
@@ -91,21 +97,24 @@ def get_training_satellite_path(site_name: str, low_tide_delta_hrs: int, low_tid
     keeping it distinct from earlier unfiltered downloads used by existing
     models/predictions."""
     data_path = get_data_path()
-    folder_name = "satellite_images_filtered" if filtered else "satellite_images"
     satellite_path = (
         data_path / "training"
-        / f"tide_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_cloud_{max_cloud_cover}"
-        / folder_name
+        / get_low_tide_max_cloud_name(
+            low_tide_delta_hrs, low_tide_delta_mins, max_cloud_cover, filtered=filtered
+        )
+        / "satellite_images"
     )
     satellite_path.mkdir(exist_ok=True, parents=True)
     return satellite_path / f"{site_name}_sentinel-2.nc"
 
 
 def get_training_data_path(site_name: str, sample_method: str, method_2_threshold: float,
-                           low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int):
+                           low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int,
+                           filtered: bool = False):
     """Get the path to the training data file."""
     sample_folder_path = get_samples_path(sample_method, method_2_threshold,
-                                          low_tide_delta_hrs, low_tide_delta_mins, max_cloud_cover)
+                                          low_tide_delta_hrs, low_tide_delta_mins, max_cloud_cover,
+                                          filtered=filtered)
     return sample_folder_path / f"{site_name}_training_data.csv"
 
 
@@ -122,20 +131,24 @@ def get_models_path(sample_method: str, method_2_threshold: float,
 
 
 def get_validation_path(sample_method: str, method_2_threshold: float,
-                        low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int):
+                        low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int,
+                        filtered: bool = False):
     """Get the path to the sample folder for a given sampling method."""
 
     sample_folder = get_samples_folder(sample_method, method_2_threshold)
 
     data_path = get_data_path()
-    validation_path = data_path / "validation" /  f"tide_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_cloud_{max_cloud_cover}" / sample_folder
+    validation_path = data_path / "validation" / get_low_tide_max_cloud_name(
+        low_tide_delta_hrs, low_tide_delta_mins, max_cloud_cover, filtered=filtered
+    ) / sample_folder
     validation_path.mkdir(exist_ok=True, parents=True)
     return validation_path
 
 def get_prediction_path(sample_method: str, method_2_threshold: float,
                         model_low_tide_delta_hrs: int, model_low_tide_delta_mins: int,
                         model_max_cloud_cover: int, predict_max_cloud_cover: int,
-                        predict_low_tide_delta_hrs: int, predict_low_tide_delta_mins: int, ):
+                        predict_low_tide_delta_hrs: int, predict_low_tide_delta_mins: int,
+                        filtered: bool = False):
     """Get the path to the sample folder for a given sampling method."""
 
     sample_folder = get_samples_folder(sample_method, method_2_threshold)
@@ -143,21 +156,26 @@ def get_prediction_path(sample_method: str, method_2_threshold: float,
     data_path = get_data_path()
     satellite_path = (
         data_path / "predictions" 
-        / get_low_tide_max_cloud_name(predict_low_tide_delta_hrs, predict_low_tide_delta_mins, predict_max_cloud_cover)
+        / get_low_tide_max_cloud_name(
+            predict_low_tide_delta_hrs, predict_low_tide_delta_mins,
+            predict_max_cloud_cover, filtered=filtered,
+        )
         / "satellite_images"
                       )
     satellite_path.mkdir(exist_ok=True, parents=True)
     prediction_path = (
         satellite_path.parent /
-        f"model_{sample_folder}_{get_low_tide_max_cloud_name(model_low_tide_delta_hrs, model_low_tide_delta_mins, model_max_cloud_cover)}"
+        f"model_{sample_folder}_{get_low_tide_max_cloud_name(model_low_tide_delta_hrs, model_low_tide_delta_mins, model_max_cloud_cover, filtered=filtered)}"
                        )
     prediction_path.mkdir(exist_ok=True, parents=True)
     return prediction_path, satellite_path
 
-def get_low_tide_max_cloud_name(low_tide_delta_hrs: int, low_tide_delta_mins: int, max_cloud_cover: int):
+def get_low_tide_max_cloud_name(low_tide_delta_hrs: int, low_tide_delta_mins: int,
+                                max_cloud_cover: int, filtered: bool = False):
+    suffix = "_filtered" if filtered else ""
     if low_tide_delta_hrs is None and low_tide_delta_mins is None:
-        return f"cloud_{max_cloud_cover}"
-    return f"tide_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_cloud_{max_cloud_cover}"
+        return f"cloud_{max_cloud_cover}{suffix}"
+    return f"tide_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_cloud_{max_cloud_cover}{suffix}"
 
 
 def get_band_quality_baseline_path():

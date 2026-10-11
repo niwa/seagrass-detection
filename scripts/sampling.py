@@ -321,8 +321,8 @@ def sample_site(
     filtered: bool = False,
 ):
     """Given a site extract training data. Set filtered=True to read from the
-    satellite_images_filtered folder (see utils.get_training_satellite_path) if
-    get_site_satellite was run with apply_anomaly_filter=True."""
+    filtered satellite folder and save derived training files to the matching
+    tide/cloud `_filtered` training directory."""
 
     print(f"Site {site_name}")
     training_labels = pandas.read_csv(
@@ -355,7 +355,7 @@ def sample_site(
     training_file = utils.get_training_data_path(
         site_name=site_name, sample_method=sample_method, method_2_threshold=method_2_threshold,
         low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
-        max_cloud_cover=max_cloud_cover
+        max_cloud_cover=max_cloud_cover, filtered=filtered
     )
     if not training_file.exists():
         print("Construct training data from UAV and Satellite imagery")
@@ -402,6 +402,7 @@ def sample_site_uav_raster(
     low_tide_delta_hrs: int,
     low_tide_delta_mins: int,
     method_2_threshold: float,
+    filtered: bool = False,
 ):
     """Given a site, build the UAV class raster (see uav_class_raster_from_images_method_2)
     on the satellite grid and save as a netcdf with variable "uav_class_id", NaN where
@@ -425,7 +426,8 @@ def sample_site_uav_raster(
 
     # get low tide satellite with no cloud
     satellite_file = utils.get_training_satellite_path(site_name=site_name, low_tide_delta_hrs=low_tide_delta_hrs,
-                                              low_tide_delta_mins=low_tide_delta_mins, max_cloud_cover=max_cloud_cover)
+                                              low_tide_delta_mins=low_tide_delta_mins, max_cloud_cover=max_cloud_cover,
+                                              filtered=filtered)
     if not satellite_file.exists():
         print(
             f"WARNING: Missing satellite image for site {site_name}. Try running "
@@ -437,7 +439,7 @@ def sample_site_uav_raster(
     raster_file = utils.get_training_data_path(
         site_name=site_name, sample_method="sampling_2", method_2_threshold=method_2_threshold,
         low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
-        max_cloud_cover=max_cloud_cover
+        max_cloud_cover=max_cloud_cover, filtered=filtered
     ).with_suffix(".nc")
     if raster_file.exists():
         print(f"\t{raster_file.name} already exists. Skipping. Delete if you want it regenerated.")
@@ -559,11 +561,13 @@ def get_satellite_sample_site(
     summary
 
 def site_sample_counts_by_class(sample_method: str, method_2_threshold: float,
-                                max_cloud_cover: int, low_tide_delta_hrs: int, low_tide_delta_mins: int):
+                                max_cloud_cover: int, low_tide_delta_hrs: int, low_tide_delta_mins: int,
+                                filtered: bool = False):
     """Summarise the number of samples for each class for each site and save to csv."""
     samples_folder_path = utils.get_samples_path(sample_method, method_2_threshold,
                                                  max_cloud_cover=max_cloud_cover,
-                                                 low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins)
+                                                 low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
+                                                 filtered=filtered)
     counts_summary = []
     site_names = []
     for site_summary_file in samples_folder_path.glob("*_training_data_summary.csv"):
@@ -575,5 +579,6 @@ def site_sample_counts_by_class(sample_method: str, method_2_threshold: float,
     counts_summary = counts_summary.fillna(0)
     counts_summary.to_csv(utils.get_samples_summary_file_path(sample_method, method_2_threshold,
                                                               max_cloud_cover=max_cloud_cover,
-                                                              low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins))
+                                                              low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
+                                                              filtered=filtered))
     return counts_summary

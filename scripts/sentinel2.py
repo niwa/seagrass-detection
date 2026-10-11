@@ -1,6 +1,7 @@
 """Module focused on downloading and processing Sentinel-2 data."""
 
 import pathlib
+import zoneinfo
 import utils
 import datetime
 import requests
@@ -131,13 +132,14 @@ def get_low_tide_images_near_date(
 
     items = search_collection.items
     # Optional solar-angle screen here: use item.properties["s2:mean_solar_zenith"] (elevation = 90 - zenith) and ["s2:mean_solar_azimuth"] before tide checks or loading assets.
-    lat = float(geometry_WSG.centroid.y.squeeze())
-    lon = float(geometry_WSG.centroid.x.squeeze())
+    centroid_nzgd49 = geometry.to_crs(utils.CRS_NZGD49).geometry.union_all().centroid
+    latitude_nzgd49, longitude_nzgd49 = float(centroid_nzgd49.y), float(centroid_nzgd49.x)
     all_tide_n = len(items)
     low_tide = []
     for item in items:
         low_tide.append(
-            check_low_tide(item, lat=lat, lon=lon, low_tide_delta_hrs=low_tide_delta_hrs,
+            check_low_tide(item, lat=latitude_nzgd49, lon=longitude_nzgd49,
+                           low_tide_delta_hrs=low_tide_delta_hrs,
                            low_tide_delta_mins=low_tide_delta_mins)
         )
 
@@ -190,13 +192,13 @@ def get_low_tide_images_in_year(geometry, year: int, low_tide_delta_hrs: int,
 
     items = search_collection.items
     # Optional solar-angle screen here: use item.properties["s2:mean_solar_zenith"] (elevation = 90 - zenith) and ["s2:mean_solar_azimuth"] before tide checks or loading assets.
-    lat = float(geometry_WSG.centroid.y.squeeze())
-    lon = float(geometry_WSG.centroid.x.squeeze())
+    centroid_nzgd49 = geometry.to_crs(utils.CRS_NZGD49).geometry.union_all().centroid
+    latitude_nzgd49, longitude_nzgd49 = float(centroid_nzgd49.y), float(centroid_nzgd49.x)
     all_tide_n = len(items)
     low_tide = []
     for item in items:
         low_tide.append(
-            check_low_tide(item, lat=lat, lon=lon, low_tide_delta_hrs=low_tide_delta_hrs,
+            check_low_tide(item, lat=latitude_nzgd49, lon=longitude_nzgd49, low_tide_delta_hrs=low_tide_delta_hrs,
                            low_tide_delta_mins=low_tide_delta_mins)
         )
 
@@ -656,6 +658,23 @@ def check_low_tide(item, lat, lon, low_tide_delta_hrs: int, low_tide_delta_mins:
                 f"{TIDE_API_RETRY_DELAY_SECONDS} second."
             )
             time.sleep(TIDE_API_RETRY_DELAY_SECONDS)
+    '''
+    acquisition_time = datetime.datetime.strptime(
+        item.properties["datetime"], SATELLITE_DATE_FORMAT
+    ).replace(tzinfo=datetime.timezone.utc)
+    tides = pandas.DataFrame.from_records(response.json()["values"])
+    tides["time"] = pandas.to_datetime(tides["time"], utc=True)
+    tides["value"] = pandas.to_numeric(tides["value"])
+
+    is_low_tide = (
+        (tides["value"] <= tides["value"].shift(1))
+        & (tides["value"] <= tides["value"].shift(-1))
+    )
+    low_tides = tides[is_low_tide]
+    nearest_low = low_tides.loc[(low_tides["time"] - acquisition_time).abs().idxmin()]
+
+    within_tolerance = abs(acquisition_time - nearest_low["time"]) < tolerance
+    '''
 
     tide_times = tide_query.json()["values"]
     low_tide = False
@@ -671,6 +690,53 @@ def check_low_tide(item, lat, lon, low_tide_delta_hrs: int, low_tide_delta_mins:
                 break
     return low_tide
 
+
+def get_low_tide_info(item, lat, lon):
+    """Returns the low tide information for the given satellite image and
+      location - low tide height, time and time between the low tide and
+      satellite image acquisition.
+      lat: Latitude of the location in NZGD49
+      lon: Longitude of the location in NZGD49
+      """
+
+    dotenv.load_dotenv()
+    tide_api_key = os.environ.get("TIDE_API", None)
+    if tide_api_key is None:
+        raise ValueError("TIDE_API environment variable not set in .env file")
+
+    satellite_time_utc = datetime.datetime.strptime(
+        item.properties["datetime"],
+        SATELLITE_DATE_FORMAT).replace(tzinfo=datetime.timezone.utc)
+    satellite_time_nz_dt = satellite_time_utc.astimezone(
+        zoneinfo.ZoneInfo('Pacific/Auckland'))
+    date_and_time = datetime.datetime.strptime(
+        item.properties["datetime"], SATELLITE_DATE_FORMAT
+    ).replace(tzinfo=datetime.timezone.utc)
+    start_date = ( # get the date 7hrs before the NZDT satellite time
+        satellite_time_nz_dt - datetime.timedelta(hours=7)
+        ).strftime(DATE_FORMAT_YYYYMMDD)
+    tide_url = ( # Get tide for at least one low tide cyle either side
+        f"{TIDE_API_STUB}?lat={lat}&long={lon}&datum=MSL"
+        f"&numberOfDays=2&apikey={tide_api_key}&startDate={start_date}"
+    )
+
+    tide_query = requests.get(tide_url)
+    tide_query.raise_for_status()
+    
+    tides = pandas.DataFrame.from_records(tide_query.json()["values"])
+    tides["time"] = pandas.to_datetime(tides["time"], utc=True)
+    tides = tides[tides["value"] < 0] # Low tides only
+
+    time_from_low_tide = (tides["time"] - satellite_time_utc).abs().min()
+    nearest_low = tides.loc[(tides["time"] - satellite_time_utc).abs().idxmin()]
+
+    tide_info = { 
+        "height": nearest_low["value"],
+        "time": nearest_low["time"],
+        "time_from_low_tide": time_from_low_tide 
+            }
+
+    return tide_info
 
 def harmonize_post_2022(data):
     """Bring post-baseline reflectance bands onto the pre-2022 scale."""

@@ -146,7 +146,7 @@ def plot_validation_confusion_matrices(
 
     folder_pattern = re.compile(
         r"tide_(?:(?P<hours>\d+)hrs(?:_(?P<minutes>\d+)mins)?|"
-        r"(?P<minutes_only>\d+)mins)_cloud_(?P<cloud_percentage>\d+)"
+        r"(?P<minutes_only>\d+)mins)_cloud_(?P<cloud_percentage>\d+)_filtered"
     )
     confusion_matrices = {}
     tide_delta_labels = {}

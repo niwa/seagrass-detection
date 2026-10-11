@@ -1014,14 +1014,14 @@ def predict_tile_probabilities_unet(
     return probability_sums / numpy.maximum(overlap_counts, 1)
 
 
-def load_unet_classifier(checkpoint_file: pathlib.Path):
+def load_unet_classifier(checkpoint_file: pathlib.Path, weights_only: bool):
     """Load either UNet++ or the original diffusers UNet checkpoint."""
     checkpoint = torch.load(checkpoint_file, map_location="cpu", weights_only=False)
     classifier_type = (
         UNetClassifier if "pretrained" in checkpoint["hyper_parameters"]
         else DiffuserUNetClassifier
     )
-    return classifier_type.load_from_checkpoint(checkpoint_file)
+    return classifier_type.load_from_checkpoint(checkpoint_file, weights_only=weights_only)
 
 
 def _clip_unet_predictions_to_site(predictions, site_geometry):
@@ -1042,6 +1042,7 @@ def predict_site_for_date_unet(
     polygon_file: pathlib.Path,
     checkpoint_file: pathlib.Path,
     date: str,
+    weights_only: bool = True,
     tile_size: int = 128,
     stride: int = 64,
 ):
@@ -1051,7 +1052,7 @@ def predict_site_for_date_unet(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\tLoading U-Net checkpoint from {checkpoint_file}")
-    model = load_unet_classifier(checkpoint_file)
+    model = load_unet_classifier(checkpoint_file, weights_only=weights_only)
     model = model.to(device)
     model.eval()
 
@@ -1084,6 +1085,7 @@ def predict_site_unet(
     test_satellite_file: pathlib.Path,
     polygon_file: pathlib.Path,
     checkpoint_file: pathlib.Path,
+    weights_only: bool = True,
     tile_size: int = 128,
     stride: int = 64,
 ):
@@ -1095,7 +1097,7 @@ def predict_site_unet(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\tLoading U-Net checkpoint from {checkpoint_file}")
-    model = load_unet_classifier(checkpoint_file)
+    model = load_unet_classifier(checkpoint_file, weights_only=weights_only)
     model = model.to(device)
     model.eval()
 
@@ -1160,6 +1162,7 @@ def predict_samples(
 def predict_samples_unet(
     test_tiles: numpy.ndarray,
     checkpoint_file: pathlib.Path,
+    weights_only: bool = True,
     batch_size: int = 8,
 ) -> numpy.ndarray:
     """Predict classes for each tile using a trained U-Net checkpoint (see
@@ -1169,7 +1172,7 @@ def predict_samples_unet(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\tLoading U-Net checkpoint from {checkpoint_file}")
-    model = load_unet_classifier(checkpoint_file)
+    model = load_unet_classifier(checkpoint_file, weights_only=weights_only)
     model = model.to(device)
     model.eval()
 
