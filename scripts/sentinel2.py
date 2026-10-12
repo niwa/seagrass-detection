@@ -108,10 +108,148 @@ def get_satellite_date_range(site_name: str, date_file: pathlib.Path,
     return date_range
 
 
-def get_low_tide_images_near_date(
-    site_name, geometry, date_file, low_tide_search_days: int, low_tide_delta_hrs: int, low_tide_delta_mins: int
+def _get_tide_api_filtered_images_near_date(
+    site_name,
+    geometry,
+    date_file,
+    low_tide_search_days: int,
+    low_tide_delta_hrs: int = None,
+    low_tide_delta_mins: int = None,
 ):
-    """Return satellite images near the survey date near low tide."""
+    """Return satellite images near a survey date selected by tide or SCL threshold."""
+    date_range = get_satellite_date_range(
+        site_name, date_file, search_days=low_tide_search_days
+    )
+    print(f"\tSatellite date range {date_range}")
+    geometry_WSG = geometry.buffer(S2_RESOLUTION).to_crs(
+        utils.CRS_WSG
+    )  # ensure includes pixles on edge
+
+    search_collection = stac_search_with_retry(
+        url=CATALOGUE_URL,
+        max_items=200,
+        collections=[COLLECTION],
+        bbox=geometry_WSG.total_bounds,
+        datetime=date_range,
+        sortby=[{"field": "properties.eo:cloud_cover", "direction": "asc"}],
+        get_collection=True,
+    )
+
+    items = search_collection.items
+
+    # Optional solar-angle screen here: use item.properties["s2:mean_solar_zenith"] (elevation = 90 - zenith) and ["s2:mean_solar_azimuth"] before tide checks or loading assets.
+
+    all_tide_n = len(items)
+    centroid_nzgd49 = geometry.to_crs(utils.CRS_NZGD49).geometry.union_all().centroid
+    latitude_nzgd49, longitude_nzgd49 = float(centroid_nzgd49.y), float(centroid_nzgd49.x)
+    low_tide = [
+        _check_low_tide_from_tide_api(
+            item,
+            lat=latitude_nzgd49,
+            lon=longitude_nzgd49,
+            low_tide_delta_hrs=low_tide_delta_hrs,
+            low_tide_delta_mins=low_tide_delta_mins,
+        )
+        for item in items
+    ]
+    items = [item for item, is_low_tide in zip(items, low_tide) if is_low_tide]
+    print(f"\tTide API-filtered tiles: {len(items)} from {all_tide_n} STAC items")
+
+    if len(items) == 0:
+        return empty_satellite_dataset()
+    
+    # Keep all near lowtide
+    data = odc.stac.load(
+        items,
+        bbox=geometry_WSG.total_bounds,
+        bands=BANDS,
+        chunks={},
+        groupby="solar_day",
+        resolution=S2_RESOLUTION,
+        dtype="uint16",
+        nodata=0,
+        patch_url=planetary_computer.sign,
+    )
+    data = data.rio.clip(
+        geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
+    )
+    data.load()
+
+    print(
+        f"\tTide API-filtered tiles: {len(data['time'])} from "
+        f"{all_tide_n} STAC items"
+    )
+
+    return data
+
+
+def _get_mndwi_thresholded_images_near_date(
+    site_name,
+    geometry,
+    date_file,
+    low_tide_search_days: int,
+    mndwi_threshold: float = None,
+):
+    """Return satellite images near a survey date selected by tide or SCL threshold."""
+    date_range = get_satellite_date_range(
+        site_name, date_file, search_days=low_tide_search_days
+    )
+    print(f"\tSatellite date range {date_range}")
+    geometry_WSG = geometry.buffer(S2_RESOLUTION).to_crs(
+        utils.CRS_WSG
+    )  # ensure includes pixles on edge
+
+    search_collection = stac_search_with_retry(
+        url=CATALOGUE_URL,
+        max_items=200,
+        collections=[COLLECTION],
+        bbox=geometry_WSG.total_bounds,
+        datetime=date_range,
+        sortby=[{"field": "properties.eo:cloud_cover", "direction": "asc"}],
+        get_collection=True,
+    )
+
+    items = search_collection.items
+
+    # Optional solar-angle screen here: use item.properties["s2:mean_solar_zenith"] (elevation = 90 - zenith) and ["s2:mean_solar_azimuth"] before tide checks or loading assets.
+
+    all_tide_n = len(items)
+
+    if len(items) == 0:
+        return empty_satellite_dataset()
+    
+    # Keep all near lowtide
+    data = odc.stac.load(
+        items,
+        bbox=geometry_WSG.total_bounds,
+        bands=BANDS,
+        chunks={},
+        groupby="solar_day",
+        resolution=S2_RESOLUTION,
+        dtype="uint16",
+        nodata=0,
+        patch_url=planetary_computer.sign,
+    )
+    data = data.rio.clip(
+        geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
+    )
+    data.load()
+    data = _threshold_low_tide_dates(data, mndwi_threshold)
+    print(
+        f"\tMNDWI thresholded tiles: {len(data['time'])} from "
+        f"{all_tide_n} STAC items"
+    )
+
+    return data
+
+
+def _get_images_near_date(
+    site_name,
+    geometry,
+    date_file,
+    low_tide_search_days: int,
+):
+    """Return satellite images near a survey date selected by tide or SCL threshold."""
     date_range = get_satellite_date_range(
         site_name, date_file, search_days=low_tide_search_days
     )
@@ -132,21 +270,8 @@ def get_low_tide_images_near_date(
 
     items = search_collection.items
     # Optional solar-angle screen here: use item.properties["s2:mean_solar_zenith"] (elevation = 90 - zenith) and ["s2:mean_solar_azimuth"] before tide checks or loading assets.
-    centroid_nzgd49 = geometry.to_crs(utils.CRS_NZGD49).geometry.union_all().centroid
-    latitude_nzgd49, longitude_nzgd49 = float(centroid_nzgd49.y), float(centroid_nzgd49.x)
-    all_tide_n = len(items)
-    low_tide = []
-    for item in items:
-        low_tide.append(
-            check_low_tide(item, lat=latitude_nzgd49, lon=longitude_nzgd49,
-                           low_tide_delta_hrs=low_tide_delta_hrs,
-                           low_tide_delta_mins=low_tide_delta_mins)
-        )
-
-    items = [item for item, low_tide in zip(items, low_tide) if low_tide]
 
     if len(items) == 0:
-        print(f"\tLow tide tiles: 0 from a total lowish cloud cover tiles of {all_tide_n}")
         return empty_satellite_dataset()
     
     # Keep all near lowtide
@@ -165,17 +290,15 @@ def get_low_tide_images_near_date(
         geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
     )
     data.load()
-    print(
-        f"\tLow tide tiles: {len(data['time'])} from a total lowish cloud "
-        f"cover tiles of {all_tide_n}"
-    )
 
     return data
 
 
-def get_low_tide_images_in_year(geometry, year: int, low_tide_delta_hrs: int,
-                                low_tide_delta_mins: int):
-    """Reture satellite images near the survey date near low tide."""
+def _get_images_in_year(
+    geometry,
+    year: int,
+):
+    """Return annual Sentinel-2 images filtered by a tide delta or dry threshold."""
     geometry_WSG = geometry.buffer(S2_RESOLUTION).to_crs(
         utils.CRS_WSG
     )  # ensure includes pixles on edge
@@ -191,18 +314,57 @@ def get_low_tide_images_in_year(geometry, year: int, low_tide_delta_hrs: int,
     )
 
     items = search_collection.items
-    # Optional solar-angle screen here: use item.properties["s2:mean_solar_zenith"] (elevation = 90 - zenith) and ["s2:mean_solar_azimuth"] before tide checks or loading assets.
-    centroid_nzgd49 = geometry.to_crs(utils.CRS_NZGD49).geometry.union_all().centroid
-    latitude_nzgd49, longitude_nzgd49 = float(centroid_nzgd49.y), float(centroid_nzgd49.x)
-    all_tide_n = len(items)
-    low_tide = []
-    for item in items:
-        low_tide.append(
-            check_low_tide(item, lat=latitude_nzgd49, lon=longitude_nzgd49, low_tide_delta_hrs=low_tide_delta_hrs,
-                           low_tide_delta_mins=low_tide_delta_mins)
-        )
+    # Optional solar-angle screen here: use item.properties["s2:mean_solar_zenith"] (elevation = 90 - zenith) and ["s2:mean_solar_azimuth"] before tide checks or loading assets.    
 
-    items = [item for item, low_tide in zip(items, low_tide) if low_tide]
+    if len(items) == 0:
+        return empty_satellite_dataset()
+
+    # Keep only those with no cloud cover
+    data = odc.stac.load(
+        items,
+        bbox=geometry_WSG.total_bounds,
+        bands=BANDS,
+        chunks={},
+        groupby="solar_day",
+        resolution=S2_RESOLUTION,
+        dtype="uint16",
+        nodata=0,
+        patch_url=planetary_computer.sign,
+    )
+    data = data.rio.clip(
+        geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
+    )
+    data.load()
+
+    return data
+
+def _get_mndwi_thresholded_images_in_year(
+    geometry,
+    year: int,
+    mndwi_threshold: float = None,
+):
+    """Return annual Sentinel-2 images filtered by a tide delta or dry threshold."""
+    geometry_WSG = geometry.buffer(S2_RESOLUTION).to_crs(
+        utils.CRS_WSG
+    )  # ensure includes pixles on edge
+
+    search_collection = leafmap.stac_search(
+        url=CATALOGUE_URL,
+        max_items=400,
+        collections=[COLLECTION],
+        bbox=geometry_WSG.total_bounds,
+        datetime=f"{year}-01-01/{year}-12-31",
+        sortby=[{"field": "properties.eo:cloud_cover", "direction": "asc"}],
+        get_collection=True,
+    )
+
+    items = search_collection.items
+
+    # Optional solar-angle screen here: use item.properties["s2:mean_solar_zenith"] (elevation = 90 - zenith) and ["s2:mean_solar_azimuth"] before tide checks or loading assets.  
+  
+    all_tide_n = len(items)
+    if len(items) == 0:
+        return empty_satellite_dataset()
 
     # Keep all near lowtide and keep only those with no cloud cover
     data = odc.stac.load(
@@ -220,9 +382,77 @@ def get_low_tide_images_in_year(geometry, year: int, low_tide_delta_hrs: int,
         geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
     )
     data.load()
+    data = _threshold_low_tide_dates(data, mndwi_threshold)
     print(
-        f"\tLow tide tiles: {len(data['time'])} from a total lowish cloud "
-        f"cover tiles of {all_tide_n}"
+        f"\tmean MNDWI less than {mndwi_threshold} filtered tiles: {len(data['time'])} from "
+        f"{all_tide_n} STAC items"
+    )
+
+    return data
+
+def _get_tide_api_filtered_images_in_year(
+    geometry,
+    year: int,
+    low_tide_delta_hrs: int = None,
+    low_tide_delta_mins: int = None,
+):
+    """Return annual Sentinel-2 images filtered by a tide delta or dry threshold."""
+    geometry_WSG = geometry.buffer(S2_RESOLUTION).to_crs(
+        utils.CRS_WSG
+    )  # ensure includes pixles on edge
+
+    search_collection = leafmap.stac_search(
+        url=CATALOGUE_URL,
+        max_items=400,
+        collections=[COLLECTION],
+        bbox=geometry_WSG.total_bounds,
+        datetime=f"{year}-01-01/{year}-12-31",
+        sortby=[{"field": "properties.eo:cloud_cover", "direction": "asc"}],
+        get_collection=True,
+    )
+
+    items = search_collection.items
+    # Optional solar-angle screen here: use item.properties["s2:mean_solar_zenith"] (elevation = 90 - zenith) and ["s2:mean_solar_azimuth"] before tide checks or loading assets.    
+    all_tide_n = len(items)
+    
+    centroid_nzgd49 = geometry.to_crs(utils.CRS_NZGD49).geometry.union_all().centroid
+    latitude_nzgd49, longitude_nzgd49 = float(centroid_nzgd49.y), float(centroid_nzgd49.x)
+    low_tide = [
+        _check_low_tide_from_tide_api(
+            item,
+            lat=latitude_nzgd49,
+            lon=longitude_nzgd49,
+            low_tide_delta_hrs=low_tide_delta_hrs,
+            low_tide_delta_mins=low_tide_delta_mins,
+        )
+        for item in items
+    ]
+    items = [item for item, is_low_tide in zip(items, low_tide) if is_low_tide]
+    print(f"\tTide API-filtered tiles: {len(items)} from {all_tide_n} STAC items")
+
+    if len(items) == 0:
+        return empty_satellite_dataset()
+
+    # Keep all near lowtide and keep only those with no cloud cover
+    data = odc.stac.load(
+        items,
+        bbox=geometry_WSG.total_bounds,
+        bands=BANDS,
+        chunks={},
+        groupby="solar_day",
+        resolution=S2_RESOLUTION,
+        dtype="uint16",
+        nodata=0,
+        patch_url=planetary_computer.sign,
+    )
+    data = data.rio.clip(
+        geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
+    )
+    data.load()
+    
+    print(
+        f"\tTide API-filtered tiles: {len(data['time'])} from "
+        f"{all_tide_n} STAC items"
     )
 
     return data
@@ -251,14 +481,20 @@ def get_satellite_for_date(geometry, date_YYMMDD: str):
 
 def get_low_tide_no_cloud_images_near_date(
     site_name, geometry, max_cloud_cover, date_file,
-    low_tide_search_days, low_tide_delta_hrs, low_tide_delta_mins,
+    low_tide_search_days, low_tide_delta_hrs: int = None,
+    low_tide_delta_mins: int = None,
     apply_anomaly_filter: bool = True, n_mad: float = 3.0,
 ):
 
-    data = get_low_tide_images_near_date(
-        site_name, geometry, date_file, low_tide_search_days,
-        low_tide_delta_hrs, low_tide_delta_mins
+    data = _get_tide_api_filtered_images_near_date(
+        site_name=site_name,
+        geometry=geometry,
+        date_file=date_file,
+        low_tide_search_days=low_tide_search_days,
+        low_tide_delta_hrs=low_tide_delta_hrs,
+        low_tide_delta_mins=low_tide_delta_mins,
     )
+
     number_of_low_tide_dates = len(data["time"])
 
     if number_of_low_tide_dates == 0:
@@ -266,7 +502,7 @@ def get_low_tide_no_cloud_images_near_date(
 
     data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
     print(
-        f"\tNo cloud tiles: {len(data['time'])} from the low tide tiles of "
+        f"\tLow Cloud Tiles: {len(data['time'])} from the low tide tiles of "
         f"{number_of_low_tide_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
         f"Kept {kept.data}"
     )
@@ -296,19 +532,231 @@ def get_low_tide_no_cloud_images_near_date(
     return data
 
 
-def get_low_tide_no_cloud_images_in_year(
-    geometry, max_cloud_cover, year: int, low_tide_delta_hrs: int, low_tide_delta_mins: int,
-    site_name: str = None, apply_anomaly_filter: bool = True, n_mad: float = 3.0,
+def get_mndwi_threshold_no_cloud_images_near_date(
+    site_name, geometry, max_cloud_cover, date_file,
+    low_tide_search_days, mndwi_threshold: float = None,
+    apply_anomaly_filter: bool = True, n_mad: float = 3.0,
 ):
 
-    data = get_low_tide_images_in_year(geometry, year, low_tide_delta_hrs=low_tide_delta_hrs,
-                                       low_tide_delta_mins=low_tide_delta_mins)
+    data = _get_mndwi_thresholded_images_near_date(
+        site_name=site_name,
+        geometry=geometry,
+        date_file=date_file,
+        low_tide_search_days=low_tide_search_days,
+        mndwi_threshold=mndwi_threshold,
+    )
+        
+    number_of_low_tide_dates = len(data["time"])
+
+    if number_of_low_tide_dates == 0:
+        return data
+
+    data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
+    print(
+        f"\tLow Cloud Tiles: {len(data['time'])} from the low tide tiles of "
+        f"{number_of_low_tide_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
+        f"Kept {kept.data}"
+    )
+
+    if len(data["time"]) == 0:
+        return data
+
+    data = harmonize_post_2022(data)
+
+    if apply_anomaly_filter:
+        try:
+            baseline = load_band_quality_baseline()
+            data, deviation_per_band, kept = flag_anomalous_band_dates(
+                data, site_name=site_name, baseline=baseline, n_mad=n_mad
+            )
+        except (FileNotFoundError, ValueError) as error:
+            print(
+                f"\tWARNING - could not apply the band quality anomaly filter for site "
+                f"{site_name} ({error}). Skipping this filter for this site."
+            )
+
+        if len(data["time"]) == 0:
+            return data
+
+    utils.write_netcdf_conventions_in_place(data)
+
+    return data
+
+
+def get_cloud_filtered_images_near_date(
+    site_name, geometry, max_cloud_cover, date_file,
+    low_tide_search_days,
+    apply_anomaly_filter: bool = True, n_mad: float = 3.0,
+):
+
+    data = _get_images_near_date(
+        site_name=site_name,
+        geometry=geometry,
+        date_file=date_file,
+        low_tide_search_days=low_tide_search_days,
+    )
+        
+    number_of_low_tide_dates = len(data["time"])
+
+    if number_of_low_tide_dates == 0:
+        return data
+
+    data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
+    print(
+        f"\tLow Cloud Tiles: {len(data['time'])} from the low tide tiles of "
+        f"{number_of_low_tide_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
+        f"Kept {kept.data}"
+    )
+
+    if len(data["time"]) == 0:
+        return data
+
+    data = harmonize_post_2022(data)
+
+    if apply_anomaly_filter:
+        try:
+            baseline = load_band_quality_baseline()
+            data, deviation_per_band, kept = flag_anomalous_band_dates(
+                data, site_name=site_name, baseline=baseline, n_mad=n_mad
+            )
+        except (FileNotFoundError, ValueError) as error:
+            print(
+                f"\tWARNING - could not apply the band quality anomaly filter for site "
+                f"{site_name} ({error}). Skipping this filter for this site."
+            )
+
+        if len(data["time"]) == 0:
+            return data
+
+    utils.write_netcdf_conventions_in_place(data)
+
+    return data
+
+def get_low_tide_no_cloud_images_in_year(
+    geometry,
+    max_cloud_cover,
+    year: int, 
+    low_tide_delta_hrs: int,
+    low_tide_delta_mins: int, 
+    site_name: str = None, 
+    apply_anomaly_filter: bool = True, 
+    n_mad: float = 3.0,
+):
+
+    data = _get_tide_api_filtered_images_in_year(
+        geometry=geometry,
+        year=year,
+        low_tide_delta_hrs=low_tide_delta_hrs,
+        low_tide_delta_mins=low_tide_delta_mins,
+    )
+    
     number_of_low_tide_dates = len(data["time"])
 
     data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
     print(
-        f"\tNo cloud tiles: {len(data['time'])} from the low tide tiles of"
+        f"\tLow cloud tiles: {len(data['time'])} from the low tide tiles of"
         f" {number_of_low_tide_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
+        f"Kept {kept.data}"
+    )
+
+    if len(data["time"]) == 0:
+        return data
+
+    data = harmonize_post_2022(data)
+
+    if apply_anomaly_filter:
+        if site_name is None:
+            print("\tWARNING - apply_anomaly_filter=True but no site_name given. Skipping this filter.")
+        else:
+            try:
+                baseline = load_band_quality_baseline()
+                data, deviation_per_band, kept = flag_anomalous_band_dates(
+                    data, site_name=site_name, baseline=baseline, n_mad=n_mad
+                )
+            except (FileNotFoundError, ValueError) as error:
+                print(
+                    f"\tWARNING - could not apply the band quality anomaly filter for site "
+                    f"{site_name} ({error}). Skipping this filter for this site."
+                )
+
+            if len(data["time"]) == 0:
+                return data
+
+    utils.write_netcdf_conventions_in_place(data)
+
+    return data
+
+def get_mndwi_and_cloud_filtered_images_in_year(
+    geometry,
+    max_cloud_cover,
+    year: int, 
+    mndwi_threshold: float = None,
+    site_name: str = None, 
+    apply_anomaly_filter: bool = True, 
+    n_mad: float = 3.0,
+):
+
+    data = _get_mndwi_thresholded_images_in_year(
+        geometry=geometry,
+        year=year,
+        mndwi_threshold=mndwi_threshold,
+    )
+
+    data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
+    print(
+        f"\tLess than {max_cloud_cover}% cloud tiles: {len(data['time'])} from the MNDWI filtered tiles of"
+        f" {len(data['time'])}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
+        f"Kept {kept.data}"
+    )
+
+    if len(data["time"]) == 0:
+        return data
+
+    data = harmonize_post_2022(data)
+
+    if apply_anomaly_filter:
+        if site_name is None:
+            print("\tWARNING - apply_anomaly_filter=True but no site_name given. Skipping this filter.")
+        else:
+            try:
+                baseline = load_band_quality_baseline()
+                data, deviation_per_band, kept = flag_anomalous_band_dates(
+                    data, site_name=site_name, baseline=baseline, n_mad=n_mad
+                )
+            except (FileNotFoundError, ValueError) as error:
+                print(
+                    f"\tWARNING - could not apply the band quality anomaly filter for site "
+                    f"{site_name} ({error}). Skipping this filter for this site."
+                )
+
+            if len(data["time"]) == 0:
+                return data
+
+    utils.write_netcdf_conventions_in_place(data)
+
+    return data
+
+
+def get_cloud_filtered_images_in_year(
+    geometry,
+    max_cloud_cover,
+    year: int, 
+    site_name: str = None, 
+    apply_anomaly_filter: bool = True, 
+    n_mad: float = 3.0,
+):
+
+    print(f"\tGetting images")
+    data = _get_images_in_year(
+        geometry=geometry,
+        year=year,
+    )
+    number_of_dates = len(data["time"])
+
+    data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
+    print(
+        f"\tLow cloud tiles: {len(data['time'])} from the total tiles of"
+        f" {number_of_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
         f"Kept {kept.data}"
     )
 
@@ -421,10 +869,11 @@ def compute_band_quality_baseline(
     will later be used to flag (see filter_valid_low_cloud_dates). Still requires low
     tide (not tide-agnostic), since tide state otherwise dominates the reflectance
     spread for intertidal sites. satellite_images_paths is a per-year satellite image
-    folder (or list of folders, e.g. one per tide delta, to pool more dates per site)
-    from utils.get_prediction_path (i.e. `<site>_<year>_sentinel-2.nc` files) - all
-    years/folders found for a site are concatenated before computing the baseline, so
-    the MAD reflects genuine date-to-date variation rather than a single date.
+    folder (or list of folders, e.g. one per tide delta, to pool more dates per site
+    , or for a mndwi thresholded images) from utils.get_prediction_path 
+    (i.e. `<site>_<year>_sentinel-2.nc` files) - all years/folders found for a site
+    are concatenated before computing the baseline, so the MAD reflects genuine
+    date-to-date variation rather than a single date.
 
     Each site's raw MAD is shrunk toward a cross-site, n_images-weighted global MAD
     per band (shrunk = n/(n+k)*site_mad + k/(n+k)*global_mad, with k=mad_shrinkage_k),
@@ -526,6 +975,20 @@ def load_band_quality_baseline() -> pandas.DataFrame:
     return pandas.read_csv(utils.get_band_quality_baseline_path())
 
 
+def _threshold_low_tide_dates(
+    data,
+    mndwi_threshold: float,
+):
+    """Drop dates whose mean MNDWI within the site polygon is greater than the threshold
+    specified by the mndwi_threshold parameter. """
+    green = data["B03"].astype(numpy.float32)
+    swir1 = data["B11"].astype(numpy.float32)
+    mndwi = (green - swir1) / (green + swir1)
+    mndwi = mndwi.mean(dim=["x", "y"])
+    valid = (mndwi <= mndwi_threshold)
+    return data.isel(time=valid.values)
+
+
 def flag_anomalous_band_dates(
     data,
     site_name: str,
@@ -588,7 +1051,7 @@ def flag_anomalous_band_dates(
     return data.isel(time=kept.values), deviation_per_band, kept
 
 
-def get_low_tide(item, lat, lon):
+def get_low_tide_info_from_tide_api(item, lat, lon):
     """Check if satellite images were taken during low tide."""
 
     dotenv.load_dotenv()
@@ -623,75 +1086,19 @@ def get_low_tide(item, lat, lon):
     return time_from_low_tide
 
 
-def check_low_tide(item, lat, lon, low_tide_delta_hrs: int, low_tide_delta_mins: int = 0):
-    """Check if satellite images were taken during low tide."""
+def _check_low_tide_from_tide_api(
+    item, lat, lon, low_tide_delta_hrs: int, low_tide_delta_mins: int
+):
+    """Check if satellite images were taken during low tide. Lat and Lon should be in NZGD1949
+    and the StartDate in the URL should be NZDT. """
 
-    dotenv.load_dotenv()
-    tide_api_key = os.environ.get("TIDE_API", None)
-    if tide_api_key is None:
-        raise ValueError("TIDE_API environment variable not set in .env file")
+    tide_info = get_low_tide_info_from_tide_api(item, lat, lon)
 
-    date_and_time = datetime.datetime.strptime(
-        item.properties["datetime"], SATELLITE_DATE_FORMAT
-    )
-    start_date = (
-        date_and_time - datetime.timedelta(hours=low_tide_delta_hrs, minutes=low_tide_delta_mins)
-        ).strftime(DATE_FORMAT_YYYYMMDD)
-    tide_url = (
-        f"{TIDE_API_STUB}?lat={lat}&long={lon}&datum=MSL"
-        f"&numberOfDays=2&apikey={tide_api_key}&startDate={start_date}"
-    )
-
-    for attempt in range(1, 3):
-        try:
-            tide_query = requests.get(tide_url)
-            tide_query.raise_for_status()
-            break
-        except requests.RequestException as error:
-            if attempt == 2:
-                raise RuntimeError(
-                    f"Could not get the low tide API to respond after 2 attempts "
-                    f"for item {item}."
-                ) from error
-            print(
-                f"\tIgnore error {error} and try again in "
-                f"{TIDE_API_RETRY_DELAY_SECONDS} second."
-            )
-            time.sleep(TIDE_API_RETRY_DELAY_SECONDS)
-    '''
-    acquisition_time = datetime.datetime.strptime(
-        item.properties["datetime"], SATELLITE_DATE_FORMAT
-    ).replace(tzinfo=datetime.timezone.utc)
-    tides = pandas.DataFrame.from_records(response.json()["values"])
-    tides["time"] = pandas.to_datetime(tides["time"], utc=True)
-    tides["value"] = pandas.to_numeric(tides["value"])
-
-    is_low_tide = (
-        (tides["value"] <= tides["value"].shift(1))
-        & (tides["value"] <= tides["value"].shift(-1))
-    )
-    low_tides = tides[is_low_tide]
-    nearest_low = low_tides.loc[(low_tides["time"] - acquisition_time).abs().idxmin()]
-
-    within_tolerance = abs(acquisition_time - nearest_low["time"]) < tolerance
-    '''
-
-    tide_times = tide_query.json()["values"]
-    low_tide = False
-    for tide_time in tide_times:
-        if tide_time["value"] < 0:
-            time_diff = abs(
-                datetime.datetime.strptime(tide_time["time"], TIDE_DATE_FORMAT)
-                - date_and_time
-            )
-            if time_diff < datetime.timedelta(hours=low_tide_delta_hrs, minutes=low_tide_delta_mins):
-                low_tide = True
-                print(f"\tTime from low tide: {time_diff} for {item.id}")
-                break
-    return low_tide
+    return tide_info["time_from_low_tide"] <= pandas.Timedelta(
+        hours=low_tide_delta_hrs, minutes=low_tide_delta_mins)
 
 
-def get_low_tide_info(item, lat, lon):
+def get_low_tide_info_from_tide_api(item, lat, lon):
     """Returns the low tide information for the given satellite image and
       location - low tide height, time and time between the low tide and
       satellite image acquisition.
@@ -704,16 +1111,14 @@ def get_low_tide_info(item, lat, lon):
     if tide_api_key is None:
         raise ValueError("TIDE_API environment variable not set in .env file")
 
-    satellite_time_utc = datetime.datetime.strptime(
+    satellite_datetime_utc = datetime.datetime.strptime(
         item.properties["datetime"],
         SATELLITE_DATE_FORMAT).replace(tzinfo=datetime.timezone.utc)
-    satellite_time_nz_dt = satellite_time_utc.astimezone(
+    satellite_datetime_nz_dt = satellite_datetime_utc.astimezone(
         zoneinfo.ZoneInfo('Pacific/Auckland'))
-    date_and_time = datetime.datetime.strptime(
-        item.properties["datetime"], SATELLITE_DATE_FORMAT
-    ).replace(tzinfo=datetime.timezone.utc)
+    
     start_date = ( # get the date 7hrs before the NZDT satellite time
-        satellite_time_nz_dt - datetime.timedelta(hours=7)
+        satellite_datetime_nz_dt - datetime.timedelta(hours=7)
         ).strftime(DATE_FORMAT_YYYYMMDD)
     tide_url = ( # Get tide for at least one low tide cyle either side
         f"{TIDE_API_STUB}?lat={lat}&long={lon}&datum=MSL"
@@ -727,12 +1132,12 @@ def get_low_tide_info(item, lat, lon):
     tides["time"] = pandas.to_datetime(tides["time"], utc=True)
     tides = tides[tides["value"] < 0] # Low tides only
 
-    time_from_low_tide = (tides["time"] - satellite_time_utc).abs().min()
-    nearest_low = tides.loc[(tides["time"] - satellite_time_utc).abs().idxmin()]
+    time_from_low_tide = (tides["time"] - satellite_datetime_utc).abs().min()
+    nearest_low = tides.loc[(tides["time"] - satellite_datetime_utc).abs().idxmin()]
 
     tide_info = { 
-        "height": nearest_low["value"],
-        "time": nearest_low["time"],
+        "nearest_low_tide_height": nearest_low["value"],
+        "nearest_low_tide_time": nearest_low["time"],
         "time_from_low_tide": time_from_low_tide 
             }
 
