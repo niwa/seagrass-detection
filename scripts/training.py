@@ -141,10 +141,11 @@ def train_random_forest_classifier(
 
 def load_samples_and_tile(
     training_sites: list,
-    low_tide_delta_hrs: int,
-    low_tide_delta_mins: int,
     max_cloud_cover: int,
     method_2_threshold: float,
+    use_threshold: bool = False,
+    low_tide_delta_hrs: int = None,
+    low_tide_delta_mins: int = None,
     tile_size: int = 64,
     stride: int = None, verbose: bool = False,
     filtered: bool = False,
@@ -167,12 +168,12 @@ def load_samples_and_tile(
             print(f"Load and tile site: {training_site}")
         satellite_file = utils.get_training_satellite_path(
             site_name=training_site, low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
-            max_cloud_cover=max_cloud_cover, filtered=filtered
+            use_threshold=use_threshold, max_cloud_cover=max_cloud_cover, filtered=filtered
         )
         uav_file = utils.get_training_data_path(
                 site_name=training_site, sample_method="sampling_2", method_2_threshold=method_2_threshold,
                 low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
-                max_cloud_cover=max_cloud_cover
+                use_threshold=use_threshold, max_cloud_cover=max_cloud_cover
             ).with_suffix(".nc")
 
         if not satellite_file.exists():

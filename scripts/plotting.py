@@ -1,16 +1,21 @@
 """Module focused on plotting training data, model diagnostics and confusion matrices."""
 
+import base64
+import io
+
 import pandas
 import sklearn.metrics
 import joblib
 import numpy
 import pathlib
+import html
 import re
 import matplotlib.pyplot
 import plotly.colors
 import plotly.graph_objects
 import plotly.subplots
 import utils
+import sentinel2
 
 
 def plot_model_feature_importance(training_dataframe, model_file):
@@ -446,3 +451,134 @@ def plot_site_predicted_vs_surveyed_areas(
         output_paths.append(composite_path)
 
     return output_paths
+
+
+
+def make_gallery(site_name, gallery_title, cards, output_file, satellite_path, legend_html="", date_range_label="", max_cloud_cover_pct=0): 
+    gallery_style = """
+:root { color-scheme: light; font-family: "Segoe UI", sans-serif; color: #202a33; background: #f3f5f6; }
+body { margin: 0; padding: 20px; }
+header, .gallery, .legend { max-width: 1500px; margin: 0 auto 16px; }
+h1 { margin: 0 0 6px; font-size: 22px; }
+p { margin: 0; color: #56616b; }
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 14px; }
+.scene { min-width: 0; overflow: hidden; background: white; border: 1px solid #d5dce1; border-radius: 5px; }
+.scene h2 { margin: 10px 12px 0; font-size: 15px; }
+.scene img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #f7f8f8; }
+.caption { padding: 8px 12px 11px; font-size: 12px; line-height: 1.4; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 10px; background: white; border: 1px solid #d5dce1; }
+.legend-item { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; }
+.legend-item i { display: inline-block; width: 14px; height: 14px; border: 1px solid #7b858c; }
+@media (max-width: 600px) { body { padding: 10px; } }
+"""
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(site_name)} {html.escape(date_range_label)} {html.escape(gallery_title)}</title>
+<style>{gallery_style}</style>
+</head>
+<body>
+<header><h1>{html.escape(site_name)}: {html.escape(date_range_label)} {html.escape(gallery_title)}</h1>
+<p>{len(cards)} scenes with catalogue cloud cover under {max_cloud_cover_pct:g}%.</p></header>
+{legend_html}
+<main class="gallery">{''.join(cards)}</main>
+</body>
+</html>"""
+    output_file.write_text(page, encoding="utf-8")
+    print(f"  Saved {output_file}")
+
+
+def time_key(timestamp):
+    return timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def load_site_scenes(site_name, mndwi, years, satellite_path):
+    site_rows = mndwi.loc[mndwi["site"] == site_name].copy()
+    site_rows["time"] = pandas.to_datetime(site_rows["time"])
+    mndwi_by_time = {
+        time_key(timestamp): value
+        for timestamp, value in zip(site_rows["time"], site_rows["mean_mndwi"])
+    }
+
+    scenes = []
+    for year in years:
+        satellite_file = satellite_path / f"{site_name}_{year}_sentinel-2.nc"
+        if not satellite_file.exists():
+            continue
+
+        satellite_data = utils.load_satellite(filename=satellite_file, chunks=None)
+
+        for scene_index, scene_time in enumerate(satellite_data.time.values):
+            rgb = numpy.stack(
+                [
+                    satellite_data[band].isel(time=scene_index).values
+                    for band in sentinel2.RGB_BANDS
+                ],
+                axis=-1,
+            ).astype(numpy.float32)
+
+            scenes.append(
+                (mndwi_by_time.get(time_key(scene_time), numpy.nan), scene_time, rgb)
+            )
+
+    scenes.sort(
+        key=lambda scene: (
+            pandas.isna(scene[0]),
+            -scene[0] if pandas.notna(scene[0]) else 0,
+        )
+    )
+    return scenes
+
+
+def make_rgb_cards(site_name, scenes):
+    cards = []
+    for mndwi_value, scene_time, rgb in scenes:
+        valid = numpy.isfinite(rgb).all(axis=-1) & (rgb >= 0).all(axis=-1) & (rgb > 0).any(axis=-1)
+        display_rgb = numpy.ones_like(rgb)
+
+        if valid.any():
+            for channel in range(3):
+                pixels = rgb[..., channel][valid]
+                low, high = numpy.percentile(pixels, [2, 98])
+                if high > low:
+                    display_rgb[..., channel] = numpy.clip(
+                        (rgb[..., channel] - low) / (high - low), 0, 1
+                    )
+
+        display_rgb[~valid] = 1
+        image_buffer = io.BytesIO()
+        figure, axis = matplotlib.pyplot.subplots(figsize=(5, 3.75))
+        axis.imshow(display_rgb)
+        axis.axis("off")
+        figure.savefig(
+            image_buffer,
+            format="jpg",
+            dpi=90,
+            bbox_inches="tight",
+            pad_inches=0,
+            pil_kwargs={"quality": 84, "optimize": True},
+        )
+        matplotlib.pyplot.close(figure)
+
+        image = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+        date_label = html.escape(scene_time.strftime("%Y-%m-%d %H:%M"))
+        value_label = f"{mndwi_value:.3f}" if pandas.notna(mndwi_value) else "unavailable"
+        cards.append(
+            f'<article class="scene"><h2>{date_label}</h2>'
+            f'<img src="data:image/jpeg;base64,{image}" alt="{site_name} RGB {date_label}">'
+            f'<div class="caption">Mean MNDWI: {value_label}</div></article>'
+        )
+
+    return cards
+
+def create_rgb_gallery(site_name, mndwi, gallery_file, years, max_cloud_cover, satellite_path):
+    print(f"\tSite {site_name} - create gallery")
+
+    scenes = load_site_scenes(site_name, mndwi, years, satellite_path)
+    cards = make_rgb_cards(site_name, scenes)
+    
+    date_range_label = f"{min(years)}-{max(years)}"
+    
+    make_gallery(site_name, "RGB scenes by mean MNDWI", cards, gallery_file, satellite_path, date_range_label=date_range_label, max_cloud_cover_pct=max_cloud_cover)

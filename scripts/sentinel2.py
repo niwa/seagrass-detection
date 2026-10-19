@@ -47,6 +47,7 @@ BANDS = [
 ]
 RGB_BANDS = ["B04", "B03", "B02"]
 SCL_TO_IGNORE = [
+    0,  # NO_DATA
     1,  # SATURATED_OR_DEFECTIVE
     3,  # CLOUD_SHADOWS
     8,  # CLOUD_MEDIUM_PROBABILITY
@@ -174,6 +175,7 @@ def _get_tide_api_filtered_images_near_date(
         geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
     )
     data.load()
+    data = harmonize_post_2022(data)
 
     print(
         f"\tTide API-filtered tiles: {len(data['time'])} from "
@@ -234,6 +236,9 @@ def _get_mndwi_thresholded_images_near_date(
         geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
     )
     data.load()
+    data = harmonize_post_2022(data)
+
+
     data = _threshold_low_tide_dates(data, mndwi_threshold)
     print(
         f"\tMNDWI thresholded tiles: {len(data['time'])} from "
@@ -290,6 +295,7 @@ def _get_images_near_date(
         geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
     )
     data.load()
+    data = harmonize_post_2022(data)
 
     return data
 
@@ -335,6 +341,7 @@ def _get_images_in_year(
         geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
     )
     data.load()
+    data = harmonize_post_2022(data)
 
     return data
 
@@ -382,6 +389,8 @@ def _get_mndwi_thresholded_images_in_year(
         geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
     )
     data.load()
+    data = harmonize_post_2022(data)
+    
     data = _threshold_low_tide_dates(data, mndwi_threshold)
     print(
         f"\tmean MNDWI less than {mndwi_threshold} filtered tiles: {len(data['time'])} from "
@@ -449,6 +458,7 @@ def _get_tide_api_filtered_images_in_year(
         geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
     )
     data.load()
+    data = harmonize_post_2022(data)
     
     print(
         f"\tTide API-filtered tiles: {len(data['time'])} from "
@@ -483,7 +493,8 @@ def get_low_tide_no_cloud_images_near_date(
     site_name, geometry, max_cloud_cover, date_file,
     low_tide_search_days, low_tide_delta_hrs: int = None,
     low_tide_delta_mins: int = None,
-    apply_anomaly_filter: bool = True, n_mad: float = 3.0,
+    anomaly_filter_baseline: pandas.DataFrame = None,
+    n_mad: float = 3.0,
 ):
 
     data = _get_tide_api_filtered_images_near_date(
@@ -500,7 +511,7 @@ def get_low_tide_no_cloud_images_near_date(
     if number_of_low_tide_dates == 0:
         return data
 
-    data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
+    data, cloud_cover_percentage, kept = filter_on_max_scl_ignore(data, max_cloud_cover, geometry)
     print(
         f"\tLow Cloud Tiles: {len(data['time'])} from the low tide tiles of "
         f"{number_of_low_tide_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
@@ -510,19 +521,10 @@ def get_low_tide_no_cloud_images_near_date(
     if len(data["time"]) == 0:
         return data
 
-    data = harmonize_post_2022(data)
-
-    if apply_anomaly_filter:
-        try:
-            baseline = load_band_quality_baseline()
-            data, deviation_per_band, kept = flag_anomalous_band_dates(
-                data, site_name=site_name, baseline=baseline, n_mad=n_mad
-            )
-        except (FileNotFoundError, ValueError) as error:
-            print(
-                f"\tWARNING - could not apply the band quality anomaly filter for site "
-                f"{site_name} ({error}). Skipping this filter for this site."
-            )
+    if anomaly_filter_baseline is not None:
+        data, deviation_per_band, kept = flag_anomalous_band_dates(
+            data, baseline=anomaly_filter_baseline, n_mad=n_mad
+        )
 
         if len(data["time"]) == 0:
             return data
@@ -535,7 +537,8 @@ def get_low_tide_no_cloud_images_near_date(
 def get_mndwi_threshold_no_cloud_images_near_date(
     site_name, geometry, max_cloud_cover, date_file,
     low_tide_search_days, mndwi_threshold: float = None,
-    apply_anomaly_filter: bool = True, n_mad: float = 3.0,
+    anomaly_filter_baseline: pandas.DataFrame = None,
+    n_mad: float = 3.0,
 ):
 
     data = _get_mndwi_thresholded_images_near_date(
@@ -551,7 +554,7 @@ def get_mndwi_threshold_no_cloud_images_near_date(
     if number_of_low_tide_dates == 0:
         return data
 
-    data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
+    data, cloud_cover_percentage, kept = filter_on_max_scl_ignore(data, max_cloud_cover, geometry)
     print(
         f"\tLow Cloud Tiles: {len(data['time'])} from the low tide tiles of "
         f"{number_of_low_tide_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
@@ -561,19 +564,10 @@ def get_mndwi_threshold_no_cloud_images_near_date(
     if len(data["time"]) == 0:
         return data
 
-    data = harmonize_post_2022(data)
-
-    if apply_anomaly_filter:
-        try:
-            baseline = load_band_quality_baseline()
-            data, deviation_per_band, kept = flag_anomalous_band_dates(
-                data, site_name=site_name, baseline=baseline, n_mad=n_mad
-            )
-        except (FileNotFoundError, ValueError) as error:
-            print(
-                f"\tWARNING - could not apply the band quality anomaly filter for site "
-                f"{site_name} ({error}). Skipping this filter for this site."
-            )
+    if anomaly_filter_baseline is not None:
+        data, deviation_per_band, kept = flag_anomalous_band_dates(
+            data, baseline=anomaly_filter_baseline, n_mad=n_mad
+        )
 
         if len(data["time"]) == 0:
             return data
@@ -586,7 +580,8 @@ def get_mndwi_threshold_no_cloud_images_near_date(
 def get_cloud_filtered_images_near_date(
     site_name, geometry, max_cloud_cover, date_file,
     low_tide_search_days,
-    apply_anomaly_filter: bool = True, n_mad: float = 3.0,
+    anomaly_filter_baseline: pandas.DataFrame = None,
+    n_mad: float = 3.0,
 ):
 
     data = _get_images_near_date(
@@ -601,7 +596,7 @@ def get_cloud_filtered_images_near_date(
     if number_of_low_tide_dates == 0:
         return data
 
-    data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
+    data, cloud_cover_percentage, kept = filter_on_max_scl_ignore(data, max_cloud_cover, geometry)
     print(
         f"\tLow Cloud Tiles: {len(data['time'])} from the low tide tiles of "
         f"{number_of_low_tide_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
@@ -611,19 +606,10 @@ def get_cloud_filtered_images_near_date(
     if len(data["time"]) == 0:
         return data
 
-    data = harmonize_post_2022(data)
-
-    if apply_anomaly_filter:
-        try:
-            baseline = load_band_quality_baseline()
-            data, deviation_per_band, kept = flag_anomalous_band_dates(
-                data, site_name=site_name, baseline=baseline, n_mad=n_mad
-            )
-        except (FileNotFoundError, ValueError) as error:
-            print(
-                f"\tWARNING - could not apply the band quality anomaly filter for site "
-                f"{site_name} ({error}). Skipping this filter for this site."
-            )
+    if anomaly_filter_baseline is not None:
+        data, deviation_per_band, kept = flag_anomalous_band_dates(
+            data, baseline=anomaly_filter_baseline, n_mad=n_mad
+        )
 
         if len(data["time"]) == 0:
             return data
@@ -638,8 +624,7 @@ def get_low_tide_no_cloud_images_in_year(
     year: int, 
     low_tide_delta_hrs: int,
     low_tide_delta_mins: int, 
-    site_name: str = None, 
-    apply_anomaly_filter: bool = True, 
+    anomaly_filter_baseline: pandas.DataFrame = None,
     n_mad: float = 3.0,
 ):
 
@@ -652,7 +637,7 @@ def get_low_tide_no_cloud_images_in_year(
     
     number_of_low_tide_dates = len(data["time"])
 
-    data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
+    data, cloud_cover_percentage, kept = filter_on_max_scl_ignore(data, max_cloud_cover, geometry)
     print(
         f"\tLow cloud tiles: {len(data['time'])} from the low tide tiles of"
         f" {number_of_low_tide_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
@@ -662,25 +647,13 @@ def get_low_tide_no_cloud_images_in_year(
     if len(data["time"]) == 0:
         return data
 
-    data = harmonize_post_2022(data)
+    if anomaly_filter_baseline is not None:
+        data, deviation_per_band, kept = flag_anomalous_band_dates(
+            data, baseline=anomaly_filter_baseline, n_mad=n_mad
+        )
 
-    if apply_anomaly_filter:
-        if site_name is None:
-            print("\tWARNING - apply_anomaly_filter=True but no site_name given. Skipping this filter.")
-        else:
-            try:
-                baseline = load_band_quality_baseline()
-                data, deviation_per_band, kept = flag_anomalous_band_dates(
-                    data, site_name=site_name, baseline=baseline, n_mad=n_mad
-                )
-            except (FileNotFoundError, ValueError) as error:
-                print(
-                    f"\tWARNING - could not apply the band quality anomaly filter for site "
-                    f"{site_name} ({error}). Skipping this filter for this site."
-                )
-
-            if len(data["time"]) == 0:
-                return data
+        if len(data["time"]) == 0:
+            return data
 
     utils.write_netcdf_conventions_in_place(data)
 
@@ -691,8 +664,7 @@ def get_mndwi_and_cloud_filtered_images_in_year(
     max_cloud_cover,
     year: int, 
     mndwi_threshold: float = None,
-    site_name: str = None, 
-    apply_anomaly_filter: bool = True, 
+    anomaly_filter_baseline: pandas.DataFrame = None,
     n_mad: float = 3.0,
 ):
 
@@ -702,35 +674,23 @@ def get_mndwi_and_cloud_filtered_images_in_year(
         mndwi_threshold=mndwi_threshold,
     )
 
-    data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
+    data, cloud_cover_percentage, kept = filter_on_max_scl_ignore(data, max_cloud_cover, geometry)
     print(
         f"\tLess than {max_cloud_cover}% cloud tiles: {len(data['time'])} from the MNDWI filtered tiles of"
-        f" {len(data['time'])}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
+        f" {len(kept)}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
         f"Kept {kept.data}"
     )
 
     if len(data["time"]) == 0:
         return data
 
-    data = harmonize_post_2022(data)
+    if anomaly_filter_baseline is not None:
+        data, deviation_per_band, kept = flag_anomalous_band_dates(
+            data, baseline=anomaly_filter_baseline, n_mad=n_mad
+        )
 
-    if apply_anomaly_filter:
-        if site_name is None:
-            print("\tWARNING - apply_anomaly_filter=True but no site_name given. Skipping this filter.")
-        else:
-            try:
-                baseline = load_band_quality_baseline()
-                data, deviation_per_band, kept = flag_anomalous_band_dates(
-                    data, site_name=site_name, baseline=baseline, n_mad=n_mad
-                )
-            except (FileNotFoundError, ValueError) as error:
-                print(
-                    f"\tWARNING - could not apply the band quality anomaly filter for site "
-                    f"{site_name} ({error}). Skipping this filter for this site."
-                )
-
-            if len(data["time"]) == 0:
-                return data
+        if len(data["time"]) == 0:
+            return data
 
     utils.write_netcdf_conventions_in_place(data)
 
@@ -741,8 +701,7 @@ def get_cloud_filtered_images_in_year(
     geometry,
     max_cloud_cover,
     year: int, 
-    site_name: str = None, 
-    apply_anomaly_filter: bool = True, 
+    anomaly_filter_baseline: pandas.DataFrame = None, 
     n_mad: float = 3.0,
 ):
 
@@ -753,7 +712,7 @@ def get_cloud_filtered_images_in_year(
     )
     number_of_dates = len(data["time"])
 
-    data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
+    data, cloud_cover_percentage, kept = filter_on_max_scl_ignore(data, max_cloud_cover, geometry)
     print(
         f"\tLow cloud tiles: {len(data['time'])} from the total tiles of"
         f" {number_of_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
@@ -763,25 +722,13 @@ def get_cloud_filtered_images_in_year(
     if len(data["time"]) == 0:
         return data
 
-    data = harmonize_post_2022(data)
+    if anomaly_filter_baseline is not None:
+        data, deviation_per_band, kept = flag_anomalous_band_dates(
+            data, baseline=anomaly_filter_baseline, n_mad=n_mad
+        )
 
-    if apply_anomaly_filter:
-        if site_name is None:
-            print("\tWARNING - apply_anomaly_filter=True but no site_name given. Skipping this filter.")
-        else:
-            try:
-                baseline = load_band_quality_baseline()
-                data, deviation_per_band, kept = flag_anomalous_band_dates(
-                    data, site_name=site_name, baseline=baseline, n_mad=n_mad
-                )
-            except (FileNotFoundError, ValueError) as error:
-                print(
-                    f"\tWARNING - could not apply the band quality anomaly filter for site "
-                    f"{site_name} ({error}). Skipping this filter for this site."
-                )
-
-            if len(data["time"]) == 0:
-                return data
+        if len(data["time"]) == 0:
+            return data
 
     utils.write_netcdf_conventions_in_place(data)
 
@@ -825,11 +772,13 @@ def get_no_cloud_images_in_year(geometry, max_cloud_cover, year: int):
         geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=True
     )
     data.load()
+    data = harmonize_post_2022(data)
+
     print(f"\tTiles: {len(data['time'])} from a total of {len(items)} items")
 
     number_of_dates = len(data["time"])
 
-    data, cloud_cover_percentage, kept = filter_valid_low_cloud_dates(data, max_cloud_cover)
+    data, cloud_cover_percentage, kept = filter_on_max_scl_ignore(data, max_cloud_cover, geometry)
     print(
         f"\tNo cloud tiles: {len(data['time'])} from the tiles of"
         f" {number_of_dates}. Cloud percentages {numpy.round(cloud_cover_percentage.data, decimals=1)} "
@@ -838,7 +787,7 @@ def get_no_cloud_images_in_year(geometry, max_cloud_cover, year: int):
 
     if len(data["time"]) == 0:
         return data
-    data = harmonize_post_2022(data)
+
     utils.write_netcdf_conventions_in_place(data)
 
     return data
@@ -855,6 +804,43 @@ def filter_valid_low_cloud_dates(data, max_cloud_cover):
     kept = ((valid_count > 0) & (cloud_percentage <= max_cloud_cover)).compute()
     return data.isel(time=kept.values), cloud_percentage, kept
 
+
+
+def filter_on_max_scl_ignore(data, max_cloud_cover, geometry):
+    """Filter dates so that the percentage of ignored/bad pixels (SCL_TO_IGNORE
+    or non-negative RGB) over the full site geometry does not exceed max_cloud_cover.
+    """
+    if len(data["time"]) == 0:
+        return data, xarray.DataArray([]), xarray.DataArray([])
+
+    # 1. Build polygon mask directly via rioxarray clip
+    ones = xarray.ones_like(data["SCL"].isel(time=0), dtype="uint8")
+    site_mask = (
+        ones.rio.clip(geometry.to_crs(data.rio.crs).geometry, all_touched=True, drop=False)
+        == 1
+    )
+    total_site_pixels = int(site_mask.sum())
+
+    if total_site_pixels == 0:
+        empty_kept = xarray.DataArray(numpy.zeros(data.sizes["time"], dtype=bool), dims="time")
+        return data.isel(time=[]), xarray.DataArray([]), empty_kept
+
+    # 2. Pixel is clean only if RGB is positive and SCL is not an ignored class
+    rgb_valid = xarray.concat(
+        [data[band].notnull() & (data[band] >= 0) for band in RGB_BANDS],
+        dim="rgb_band",
+    ).all(dim="rgb_band")
+    scl_valid = data["SCL"].notnull() & ~data["SCL"].isin(SCL_TO_IGNORE)
+
+    clean_pixels = (rgb_valid & scl_valid & site_mask).sum(dim=["x", "y"])
+
+    # 3. Bad percentage calculated across entire site polygon
+    bad_percentage = (
+        100.0 * (total_site_pixels - clean_pixels) / total_site_pixels
+    ).compute()
+    kept = (bad_percentage <= max_cloud_cover).compute()
+
+    return data.isel(time=kept.values), bad_percentage, kept
 
 def compute_band_quality_baseline(
     training_sites: list,
@@ -981,17 +967,30 @@ def _threshold_low_tide_dates(
 ):
     """Drop dates whose mean MNDWI within the site polygon is greater than the threshold
     specified by the mndwi_threshold parameter. """
-    green = data["B03"].astype(numpy.float32)
-    swir1 = data["B11"].astype(numpy.float32)
-    mndwi = (green - swir1) / (green + swir1)
-    mndwi = mndwi.mean(dim=["x", "y"])
+    mndwi = _mean_mndwi_by_date(data)
     valid = (mndwi <= mndwi_threshold)
     return data.isel(time=valid.values)
+
+def _mean_mndwi_by_date(data):
+    """Compute the mean MNDWI for each date within the site polygon. Exclude invalid
+    pixels based on the SCL mask and negative reflectance values and zero denominators."""
+    green = data["B03"].astype(numpy.float32)
+    swir1 = data["B11"].astype(numpy.float32)
+    valid_pixels = (
+        data["SCL"].notnull()
+        & ~data["SCL"].isin(SCL_TO_IGNORE)
+        & (green >= 0)
+        & (swir1 >= 0)
+        & ((green + swir1) > 0)
+    )
+
+    mndwi = ((green - swir1) / (green + swir1)).where(valid_pixels)
+    mean_mndwi = mndwi.mean(dim=["x", "y"], skipna=True)
+    return mean_mndwi
 
 
 def flag_anomalous_band_dates(
     data,
-    site_name: str,
     baseline: pandas.DataFrame,
     n_mad: float = 3.0,
     bands: list = None,
@@ -1007,7 +1006,12 @@ def flag_anomalous_band_dates(
     if bands is None:
         bands = RGB_BANDS
 
+    sites = baseline["site"].dropna().unique()
+    if len(sites) != 1:
+        raise ValueError("baseline must contain rows for exactly one site")
+    site_name = sites[0]
     site_baseline = baseline[baseline["site"] == site_name].set_index("band")
+
     missing_bands = [band for band in bands if band not in site_baseline.index]
     if missing_bands:
         raise ValueError(
@@ -1016,7 +1020,7 @@ def flag_anomalous_band_dates(
         )
 
     valid = xarray.concat(
-        [data[band].notnull() & (data[band] > 0) for band in RGB_BANDS], dim="rgb_band"
+        [data[band].notnull() & (data[band] > 0) for band in bands], dim="rgb_band"
     ).all(dim="rgb_band") & ~data["SCL"].isin(SCL_TO_IGNORE)
 
     deviation_per_band = {}

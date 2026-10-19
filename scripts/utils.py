@@ -107,7 +107,7 @@ def get_site_polygon_path(site_name: str):
 
 def get_training_satellite_path(site_name: str, max_cloud_cover: int,
                                low_tide_delta_hrs: int = None, low_tide_delta_mins: int = None,
-                               use_threshold: bool = False, filtered: bool = False):
+                               use_threshold: bool = False, filtered: bool = False, label=""):
     """Get the path to the satellite file matched to the UAV survey dates.
     Low_tide_delta in hrs, and max_cloud_cover as a percentage. Set filtered=True to
     use the separate satellite_images_filtered folder for imagery that has had the
@@ -117,12 +117,7 @@ def get_training_satellite_path(site_name: str, max_cloud_cover: int,
     data_path = get_data_path()
     satellite_path = (
         data_path / "training"
-        / get_low_tide_max_cloud_name(
-            max_cloud_cover=max_cloud_cover,
-            low_tide_delta_hrs=low_tide_delta_hrs,
-            low_tide_delta_mins=low_tide_delta_mins,
-            use_threshold=use_threshold, filtered=filtered,
-        )
+        / f"{get_low_tide_max_cloud_name(max_cloud_cover=max_cloud_cover, low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins, use_threshold=use_threshold, filtered=filtered)}{label}"
         / "satellite_images"
     )
     satellite_path.mkdir(exist_ok=True, parents=True)
