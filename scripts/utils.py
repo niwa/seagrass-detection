@@ -117,7 +117,12 @@ def get_training_satellite_path(site_name: str, max_cloud_cover: int,
     data_path = get_data_path()
     satellite_path = (
         data_path / "training"
-        / f"{get_low_tide_max_cloud_name(max_cloud_cover=max_cloud_cover, low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins, use_threshold=use_threshold, filtered=filtered)}{label}"
+        / get_low_tide_max_cloud_name(
+            max_cloud_cover=max_cloud_cover,
+            low_tide_delta_hrs=low_tide_delta_hrs,
+            low_tide_delta_mins=low_tide_delta_mins,
+            use_threshold=use_threshold,
+            filtered=filtered)
         / "satellite_images"
     )
     satellite_path.mkdir(exist_ok=True, parents=True)
@@ -182,14 +187,15 @@ def get_prediction_path(sample_method: str, method_2_threshold: float,
                         model_max_cloud_cover: int, predict_max_cloud_cover: int,
                         model_low_tide_delta_hrs: int = None, model_low_tide_delta_mins: int = None,
                         predict_low_tide_delta_hrs: int = None, predict_low_tide_delta_mins: int = None,
-                        use_threshold: bool = False, filtered: bool = False, satellite_only: bool = False):
-    """Get the path to the sample folder for a given sampling method."""
+                        use_threshold: bool = False, filtered: bool = False, satellite_only: bool = False,
+                        use_council_paths: bool = False):
+    """Get prediction and satellite folders for regular or council sites."""
 
     sample_folder = get_samples_folder(sample_method, method_2_threshold)
 
-    data_path = get_data_path()
+    prediction_root = get_data_path() / ("council_predictions" if use_council_paths else "predictions")
     satellite_path = (
-        data_path / "predictions" 
+        prediction_root
         / get_low_tide_max_cloud_name(
             max_cloud_cover=predict_max_cloud_cover,
             low_tide_delta_hrs=predict_low_tide_delta_hrs,
@@ -217,11 +223,10 @@ def get_low_tide_max_cloud_name(max_cloud_cover: int,
                                 filtered: bool = False):
     suffix = "_filtered" if filtered else ""
     if use_threshold:
+        tide_time = ""
         if low_tide_delta_hrs is not None or low_tide_delta_mins is not None:
-            raise ValueError(
-                "Tide deltas must be None when use_threshold=True."
-            )
-        return f"tide_thresholded_cloud_{max_cloud_cover}{suffix}"
+            tide_time = f"_and_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}"
+        return f"tide_thresholded{tide_time}_cloud_{max_cloud_cover}{suffix}"
     if low_tide_delta_hrs is None and low_tide_delta_mins is None:
         return f"cloud_{max_cloud_cover}{suffix}"
     return f"tide_{format_low_tide_delta(low_tide_delta_hrs, low_tide_delta_mins)}_cloud_{max_cloud_cover}{suffix}"

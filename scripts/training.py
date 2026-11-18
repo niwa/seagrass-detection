@@ -173,7 +173,7 @@ def load_samples_and_tile(
         uav_file = utils.get_training_data_path(
                 site_name=training_site, sample_method="sampling_2", method_2_threshold=method_2_threshold,
                 low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
-                use_threshold=use_threshold, max_cloud_cover=max_cloud_cover
+                use_threshold=use_threshold, max_cloud_cover=max_cloud_cover, filtered=filtered
             ).with_suffix(".nc")
 
         if not satellite_file.exists():
@@ -593,6 +593,7 @@ def _train_unet_classifier(
     early_stopping_patience: int = 15,
     pretrained: bool = True,
     pretrained_model_repo: str = UNET_PRETRAINED_REPO,
+    resume_from_checkpoint: pathlib.Path = None,
 ):
     """Train a U-Net pixel classifier with PyTorch Lightning.
     `tiles` is (N, bands, tile_size, tile_size) and `labels` is (N, tile_size,
@@ -662,7 +663,13 @@ def _train_unet_classifier(
         ))
 
     trainer = pytorch_lightning.Trainer(max_epochs=epochs, callbacks=callbacks)
-    trainer.fit(model, train_dataloaders=data_loader, val_dataloaders=val_data_loader) # fit method can pass a checkpoint
+    trainer.fit(
+        model,
+          train_dataloaders=data_loader,
+            val_dataloaders=val_data_loader,
+            ckpt_path=str(resume_from_checkpoint) if resume_from_checkpoint else None,
+            # weights_only=False, # Set False if you get an error loading from a cheakpoint
+            )
     best_path = checkpoint_callback.best_model_path
     return model, best_path
 
@@ -706,6 +713,7 @@ def train_diffuser_unet_classifier(
     val_labels: numpy.ndarray = None,
     monitor_class_ids: dict = None,
     early_stopping_patience: int = 15,
+    resume_from_checkpoint: pathlib.Path = None,
 ):
     """Train the original diffusers UNet from scratch; keep checkpoints separate."""
     return _train_unet_classifier(
@@ -715,6 +723,7 @@ def train_diffuser_unet_classifier(
         val_tiles=val_tiles, val_labels=val_labels,
         monitor_class_ids=monitor_class_ids,
         early_stopping_patience=early_stopping_patience,
+        resume_from_checkpoint=resume_from_checkpoint,
     )
 
 
@@ -956,6 +965,84 @@ def predict_site(
     predictions = xarray.concat(predictions, dim="time")
     utils.write_netcdf_conventions_in_place(predictions)
 
+    return predictions, satellite_data
+
+
+def predict_site_low_tide(
+    test_satellite_file: pathlib.Path,
+    polygon_file: pathlib.Path,
+    model_file: pathlib.Path,
+    model_feature_names_file: pathlib.Path,
+    low_tide_delta_hrs: int,
+    low_tide_delta_mins: int,
+    mndwi_threshold: float,
+    anomaly_filter_baseline: pandas.DataFrame = None, 
+    n_mad: int = 3
+):
+    """Predict dates passing both MNDWI and tide API filters.
+
+    Satellite data must already be clipped to the site, with acquisition times
+    in UTC. Keep mean MNDWI <= mndwi_threshold and times within the inclusive
+    hours-plus-minutes window of low tide. Requires the TIDE_API environment
+    variable. Return (predictions, filtered_satellite_data), or (None, None)
+    with a warning if no dates survive.
+    """
+    satellite_data = utils.load_satellite(filename=test_satellite_file)
+    original_count = satellite_data.sizes["time"]
+    if original_count == 0:
+        print("\tWARNING - no satellite dates available. Skipping predictions.")
+        return None, None
+
+    satellite_data = sentinel2._threshold_low_tide_dates(
+        satellite_data, mndwi_threshold=mndwi_threshold
+    )
+    print(
+        f"\tMNDWI filter: {satellite_data.sizes['time']} of "
+        f"{original_count} dates kept"
+    )
+    if satellite_data.sizes["time"] == 0:
+        print("\tWARNING - no dates survive the MNDWI filter. Skipping predictions.")
+        return None, None
+
+    uav_polygon = geopandas.read_file(polygon_file)
+    centroid_nzgd49 = uav_polygon.to_crs(utils.CRS_NZGD49).geometry.union_all().centroid
+    satellite_data = sentinel2.filter_low_tide_dates_from_tide_api(
+        satellite_data,
+        lat=float(centroid_nzgd49.y),
+        lon=float(centroid_nzgd49.x),
+        low_tide_delta_hrs=low_tide_delta_hrs,
+        low_tide_delta_mins=low_tide_delta_mins,
+    )
+    if satellite_data.sizes["time"] == 0:
+        print("\tWARNING - no dates survive the low-tide filters. Skipping predictions.")
+        return None, None
+
+    if anomaly_filter_baseline is not None:
+            satellite_data, deviation_per_band, kept = sentinel2.flag_anomalous_band_dates(
+                satellite_data, baseline=anomaly_filter_baseline, n_mad=n_mad
+            )
+    if satellite_data.sizes["time"] == 0:
+            print("\tWARNING - no dates survive the anomaly filter. Skipping predictions.")
+            return None, None
+
+    predictions = []
+    satellite_dates = satellite_data["time"].dt.strftime("%Y-%m-%d").values
+    print(f"\tPredict for {len(satellite_dates)} satellite images")
+    for date in satellite_dates:
+        predictions.append(
+            predict_site_for_date(
+                test_satellite_file=test_satellite_file,
+                polygon_file=polygon_file,
+                model_file=model_file,
+                model_feature_names_file=model_feature_names_file,
+                date=date,
+            )
+        )
+        print(f"\tPredicted for date {date}")
+
+    print("\tCombine predictions and write conventions")
+    predictions = xarray.concat(predictions, dim="time")
+    utils.write_netcdf_conventions_in_place(predictions)
     return predictions, satellite_data
 
 
@@ -1320,9 +1407,9 @@ def confusion_matrix_of_site_for_date(
     plot_filename = prediction_file.with_name(
         f"{prediction_file.stem}_confusion_matrix{resolution_label}_date_{date}.png"
     )
-    if plot_filename.exists():
-        print(f"{plot_filename.name} already exists."
-              "Skipping. Delete plots if you want them regenerated.")
+    if plotting.confusion_matrix_outputs_exist(plot_filename):
+        print(f"{plot_filename.name} and metric CSVs already exist. "
+              "Skipping. Delete outputs if you want them regenerated.")
         return
 
     uav_training_data_reclassed, sat_prediction_data = load_truth_and_predictions(
@@ -1380,9 +1467,9 @@ def confusion_matrix_of_site(
     overall_plot_filename = prediction_file.with_name(
             f"{prediction_file.stem}_confusion_matrix{resolution_label}_all_dates.png"
         )
-    if overall_plot_filename.exists():
-        print(f"{overall_plot_filename.name} already exists."
-              "Skipping. Delete plots if you want them regenerated.")
+    if plotting.confusion_matrix_outputs_exist(overall_plot_filename):
+        print(f"{overall_plot_filename.name} and metric CSVs already exist. "
+              "Skipping. Delete outputs if you want them regenerated.")
         return
 
     print("Match satellite resolution to UAV then compare predictions to UAV")
@@ -1417,8 +1504,9 @@ def confusion_matrix_of_site(
         all_predictions.append(predictions)
 
         if debug:
-            if plot_filename.exists():
-                print(f"\t\t{plot_filename.name} exists. Skipping. Delete if you want regenerated.")
+            if plotting.confusion_matrix_outputs_exist(plot_filename):
+                print(f"\t\t{plot_filename.name} and metric CSVs exist. Skipping. "
+                      "Delete outputs if you want them regenerated.")
                 continue
             print(f"\t\tConstruct confusion matrix")
             plotting.plot_confusion_matrix(truth=truth,

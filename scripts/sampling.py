@@ -462,6 +462,110 @@ def sample_site(
     summary.to_csv(training_file.with_stem(f"{training_file.stem}_summary"))
     summary
 
+def sample_site_date_list(
+    site_name: str,
+    training_labels_file: pathlib.Path,
+    select_dates_file: pathlib.Path,
+    uav_folder: pathlib.Path,
+    max_cloud_cover: int,
+    sample_method: str,
+    method_2_threshold: float = None,
+):
+    """Given a site extract training data. Set filtered=True to read from the
+    filtered satellite folder and save derived training files to the matching
+    tide/cloud `_filtered` training directory."""
+
+    filtered = False
+    use_threshold = False
+
+    print(f"Site {site_name}")
+    training_labels = pandas.read_csv(
+        training_labels_file, sep="\t", header=None, names=["Value", "Key"]
+    ).set_index('Key')['Value'].to_dict()
+    
+    # load classified UAV - ensure is to nztm
+    uav_file = uav_folder / f"{site_name}_classified.tif"
+    if not uav_file.exists():
+        raise ValueError("\tWARNING - no classified image"
+                         f" for site {site_name}. Skipping this site.")
+    else:
+        uav_data = utils.load_classification(
+            filename=uav_file,
+            chunks=True
+        )
+
+    # get or load low tide satellite with no cloud
+    satellite_file = utils.get_training_satellite_path(site_name=site_name, use_threshold=use_threshold,
+                                              max_cloud_cover=max_cloud_cover, filtered=filtered)
+    if not satellite_file.exists():
+        print(f"\tWARNING - satellite image for site {site_name} - either it's not yet downloaded or"
+              " there is no suitable low cloud / low tide satellite image. Ignoring this site."
+              " Try running `get_site_satellite` first if you expect a satellite image.")
+        return pandas.DataFrame(columns=["x", "y", "uav_class_id"])
+    satellite_data = utils.load_satellite(filename=satellite_file)
+
+    # Only keep satellite scenes that match the selected dates - just compare the date part
+    satellite_dates = numpy.array([
+        f"{date.year:04d}-{date.month:02d}-{date.day:02d}"
+        for date in satellite_data.time.values
+    ])
+    select_dates = pandas.read_csv(select_dates_file)
+    select_dates["date"] = pandas.to_datetime(select_dates["date"], utc=True).dt.normalize()
+    selected_dates = pandas.to_datetime(
+        select_dates.loc[select_dates["site"].eq(site_name), "date"],
+        utc=True,
+    ).dt.strftime("%Y-%m-%d").to_numpy()
+    print(f"keep dates {selected_dates} of {satellite_dates}")
+    satellite_data = satellite_data.sel(time=numpy.isin(satellite_dates, selected_dates))
+    if satellite_data.time.size == 0:
+            print(f"\tWARNING - no matching satellite scenes for site {site_name} on the selected dates."
+                  " Ignoring this site.")
+            return pandas.DataFrame(columns=["x", "y", "uav_class_id"])
+
+    # Extract training dataset
+    training_file = utils.get_training_data_path(
+        site_name=site_name, sample_method=sample_method, method_2_threshold=method_2_threshold,
+        use_threshold=False, max_cloud_cover=max_cloud_cover, filtered=filtered
+    )
+    training_file = training_file.parent.parent / select_dates_file.stem / training_file.parent.name / training_file.name
+    training_file.parent.mkdir(exist_ok=True, parents=True)
+    if not training_file.exists():
+        print("Construct training data from UAV and Satellite imagery")
+        training_file.parent.mkdir(exist_ok=True)
+        if sample_method == "sampling_1":
+            training_observations = training_data_from_images_method_1(
+                satellite_data=satellite_data,
+                uav_data=uav_data,
+                labels=training_labels
+            )
+        elif sample_method == "sampling_2":
+            training_observations = training_data_from_images_method_2(
+                satellite_data=satellite_data,
+                uav_data=uav_data,
+                labels=training_labels, 
+                threshold = method_2_threshold
+            )
+        else:
+            raise ValueError(f"Invalid sample method: {sample_method}")
+        training_observations.drop(columns=["x", "y"]).to_csv(training_file, index=False)
+        # Save a gpkg of this
+        training_observations_points = geopandas.GeoDataFrame(
+            training_observations,
+            geometry=geopandas.points_from_xy(training_observations.x, training_observations.y),
+            crs=utils.CRS_NZTM
+        )
+        training_observations_points.to_file(training_file.with_suffix(".gpkg"))
+        del training_observations_points
+    else:
+        training_observations = pandas.read_csv(training_file)
+    
+    summary=pandas.DataFrame(training_observations['uav_class_id'].value_counts())
+    summary["uav_class_name"] = summary.index.map(lambda index: next((key for key, value in training_labels.items() if value == int(index)), None) )
+    summary = summary[["uav_class_name", "count"]]
+    summary.to_csv(training_file.with_stem(f"{training_file.stem}_summary"))
+    summary
+
+
 def sample_site_mndwi(
     site_name: str,
     training_labels_file: pathlib.Path,
@@ -624,19 +728,26 @@ def site_sample_counts_by_class(sample_method: str, method_2_threshold: float,
                                                  max_cloud_cover=max_cloud_cover,
                                                  low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
                                                  filtered=filtered)
+    samples_summary_file = utils.get_samples_summary_file_path(sample_method, method_2_threshold,
+                                                              max_cloud_cover=max_cloud_cover,
+                                                              low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
+                                                              filtered=filtered)
+
+    if samples_summary_file.exists():
+        print(f"{samples_summary_file} already exists. Delete if you want it regenerated.")
+        counts_summary = pandas.read_csv(samples_summary_file)
+        return counts_summary
+    
     counts_summary = []
     site_names = []
-    for site_summary_file in samples_folder_path.glob("*_training_data_summary.csv"):
+    for site_summary_file in samples_summary_file.parent.glob("*_training_data_summary.csv"):
         site_names.append(site_summary_file.stem.replace("_training_data_summary", ""))
         counts_summary.append(pandas.read_csv(site_summary_file))
     # Into a summary across all sites
     counts_summary = pandas.concat(counts_summary, keys=site_names).reset_index(
         level=0, names="Site")[["Site","uav_class_name", "count"]].pivot(index="Site", columns="uav_class_name",values="count")
     counts_summary = counts_summary.fillna(0)
-    counts_summary.to_csv(utils.get_samples_summary_file_path(sample_method, method_2_threshold,
-                                                              max_cloud_cover=max_cloud_cover,
-                                                              low_tide_delta_hrs=low_tide_delta_hrs, low_tide_delta_mins=low_tide_delta_mins,
-                                                              filtered=filtered))
+    counts_summary.to_csv()
     return counts_summary
 
 def site_sample_counts_by_class_mndwi(

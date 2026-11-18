@@ -110,6 +110,68 @@ def plot_training_data_class_distribution(training_dataframe, model_file, uav_la
                                  satellite_labels=satellite_labels)
 
 
+def _prepare_classification_arrays(truth, predictions, class_names):
+    truth = numpy.asarray(truth).ravel()
+    predictions = numpy.asarray(predictions).ravel()
+    if truth.shape != predictions.shape:
+        raise ValueError("Truth and predictions must have matching shapes")
+    valid = (
+        numpy.isfinite(truth)
+        & numpy.isfinite(predictions)
+        & (truth != utils.UAV_NAN_CLASS)
+        & (predictions != utils.UAV_NAN_CLASS)
+    )
+    if not valid.any():
+        raise ValueError("No valid pixels to evaluate")
+    if not valid.all():
+        truth, predictions = truth[valid], predictions[valid]
+    class_ids = list(class_names.values())
+    if len(set(class_ids)) != len(class_ids):
+        raise ValueError("Class IDs must be unique")
+    if not numpy.isin(truth, class_ids).all() or not numpy.isin(predictions, class_ids).all():
+        raise ValueError("All evaluated class IDs must be present in class_names")
+    return truth, predictions
+
+
+def calculate_classification_metrics(truth, predictions, class_names: dict):
+    """Return per-class and overall pixel metrics, excluding nodata and nonfinite pairs.
+
+    Macro F1 includes all configured classes; undefined scores are zero.
+    Balanced accuracy averages recall only over classes present in truth.
+    """
+    truth, predictions = _prepare_classification_arrays(truth, predictions, class_names)
+    class_ids = list(class_names.values())
+    precision, recall, f1, support = sklearn.metrics.precision_recall_fscore_support(
+        truth, predictions, labels=class_ids, zero_division=0
+    )
+    per_class = pandas.DataFrame(
+        {
+            "class_id": class_ids,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "support": support,
+        },
+        index=pandas.Index(class_names.keys(), name="class"),
+    )
+    overall = pandas.Series({
+        "accuracy": sklearn.metrics.accuracy_score(truth, predictions),
+        "balanced_accuracy": recall[support > 0].mean(),
+        "macro_f1": f1.mean(),
+        "valid_pixels": truth.size,
+    })
+    return per_class, overall
+
+
+def confusion_matrix_outputs_exist(plot_filename: pathlib.Path) -> bool:
+    """Return whether the confusion matrix PNG and both metric CSVs exist."""
+    return all(path.exists() for path in (
+        plot_filename,
+        plot_filename.with_name(f"{plot_filename.stem}_per_class_metrics.csv"),
+        plot_filename.with_name(f"{plot_filename.stem}_overall_metrics.csv"),
+    ))
+
+
 def plot_confusion_matrix(
     truth,
     predictions,
@@ -117,12 +179,13 @@ def plot_confusion_matrix(
     plot_filename: pathlib.Path,
     title: str
 ):
-    """ Create a confusion matrix with the class names """
-    label_values = numpy.unique(numpy.concat([numpy.unique(truth), numpy.unique(predictions)]))
-    label_names = [key for key, value in class_names.items() if value in label_values]
-
+    """Save a normalized confusion matrix and per-class/overall metric CSVs."""
+    truth, predictions = _prepare_classification_arrays(truth, predictions, class_names)
+    per_class, overall = calculate_classification_metrics(truth, predictions, class_names)
+    label_values = list(class_names.values())
+    label_names = list(class_names.keys())
     confusion_matrix = sklearn.metrics.confusion_matrix(
-        truth, predictions, normalize="true"
+        truth, predictions, labels=label_values, normalize="true"
     )
     display = sklearn.metrics.ConfusionMatrixDisplay(
         confusion_matrix=confusion_matrix, display_labels=label_names
@@ -138,6 +201,13 @@ def plot_confusion_matrix(
     matplotlib.pyplot.tight_layout()
     matplotlib.pyplot.title(title)
     matplotlib.pyplot.savefig(plot_filename, dpi=300, )
+    per_class.to_csv(
+        plot_filename.with_name(f"{plot_filename.stem}_per_class_metrics.csv")
+    )
+    overall.to_csv(
+        plot_filename.with_name(f"{plot_filename.stem}_overall_metrics.csv"),
+        header=["value"],
+    )
 
 
 def plot_validation_confusion_matrices(
@@ -295,6 +365,7 @@ def plot_site_predicted_vs_surveyed_areas(
     targets: list = ("Seagrass", "Ulva", "Gracilaria"),
     include_rf: bool = True,
     include_unet: bool = True,
+    filter_strings: list = ""
 ):
     """Plot, per site, predicted (across model/prediction parameter combinations) vs
     surveyed UAV target areas over time. Saves one interactive HTML per site, plus a
@@ -305,11 +376,15 @@ def plot_site_predicted_vs_surveyed_areas(
     website_path = data_path / "website"
     uav_areas_path = website_path / "uav_areas"
 
+    rf_un_label = ""
+    rf_un_label += "_rf" if include_rf else ""
+    rf_un_label += "_un" if include_unet else ""
+
     folder_pattern = re.compile(
         r"(?:(?P<rf>RF)|(?P<unet>UN))_model_"
         r"(?P<model_description>.*?_10_percent_test)"
-        r"(?(rf)_train|_\d+_epochs_(?P<tile_size>\d+)_tiling_"
-        r"(?P<tile_stride>\d+)_stride_(?P<unet_description>.*?)_train)"
+        r"(?(rf)_train|_(?P<epochs>\d+)_epochs_(?P<tile_size>\d+)_tiling_"
+        r"(?P<tile_stride>\d+)_stride_train)"
         r"_sampling_2_"
         r"(?P<method_2_threshold>\d+)_percent_"
         r"tide_"
@@ -325,8 +400,11 @@ def plot_site_predicted_vs_surveyed_areas(
     for folder in website_path.iterdir():
         if folder.is_dir() and (match := folder_pattern.fullmatch(folder.name)) is not None:
             if (match.group("rf") and include_rf) or (match.group("unet") and include_unet):
-                model_folders.append((folder, match))
-                print(f"Found model folder: {folder}")
+                if numpy.all([string in folder.name for string in filter_strings]):
+                    model_folders.append((folder, match))
+                    print(f"Found model folder: {folder.name}")
+                else:
+                    print(f"Ignore {folder.name} as missing {filter_strings}")
     if not model_folders:
         raise FileNotFoundError(f"No model prediction folders found in {website_path}")
 
@@ -369,7 +447,7 @@ def plot_site_predicted_vs_surveyed_areas(
             )
             model_label = (
                 "RF" if folder_match.group("rf") else
-                f"UNet tile={folder_match.group('tile_size')} stride={folder_match.group('tile_stride')}"
+                f"UNet tile={folder_match.group('tile_size')} stride={folder_match.group('tile_stride')}, epochs={folder_match.group('epochs')}"
             )
             label = (
                 f"{model_label}, sampling={folder_match.group('method_2_threshold')}%, "
@@ -380,7 +458,7 @@ def plot_site_predicted_vs_surveyed_areas(
             )
             descriptions = [
                 folder_match.group(name)
-                for name in ("model_description", "unet_description", "suffix_description")
+                for name in ("model_description", "suffix_description")
                 if folder_match.group(name)
             ]
             if descriptions:
@@ -423,7 +501,7 @@ def plot_site_predicted_vs_surveyed_areas(
             )
 
         figure.update_layout(height=400 * len(targets), width=2800, title=f"{site_name}: predicted vs surveyed areas")
-        output_path = output_directory / f"{site_name}_target_area_timeseries.html"
+        output_path = output_directory / f"{site_name}_target_area_timeseries{rf_un_label}.html"
         figure.write_html(output_path)
         output_paths.append(output_path)
 
@@ -446,7 +524,7 @@ def plot_site_predicted_vs_surveyed_areas(
                 )
 
         figure.update_layout(height=400 * nrows, width=500 * ncols, title="Predicted vs surveyed target areas")
-        composite_path = output_directory / "all_sites_target_area_timeseries.html"
+        composite_path = output_directory / f"all_sites_target_area_timeseries{rf_un_label}.html"
         figure.write_html(composite_path)
         output_paths.append(composite_path)
 
@@ -494,17 +572,24 @@ def time_key(timestamp):
     return timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
-def load_site_scenes(site_name, mndwi, years, satellite_path):
-    site_rows = mndwi.loc[mndwi["site"] == site_name].copy()
-    site_rows["time"] = pandas.to_datetime(site_rows["time"])
-    mndwi_by_time = {
+def load_site_scenes(site_name, sort_values, satellite_path, years, sort_column):
+    
+    site_rows = sort_values.loc[
+        sort_values["site"].eq(site_name), ["time", sort_column]
+    ].copy()
+    site_rows["time"] = pandas.to_datetime(site_rows["time"], utc=True)
+    sort_value_by_time = {
         time_key(timestamp): value
-        for timestamp, value in zip(site_rows["time"], site_rows["mean_mndwi"])
+        for timestamp, value in zip(site_rows["time"], site_rows[sort_column])
     }
 
     scenes = []
-    for year in years:
-        satellite_file = satellite_path / f"{site_name}_{year}_sentinel-2.nc"
+    if years is None:
+        year_labels = [""]
+    else:
+        year_labels = [f"_{year}" for year in years]
+    for year_label in year_labels:
+        satellite_file = satellite_path / f"{site_name}{year_label}_sentinel-2.nc"
         if not satellite_file.exists():
             continue
 
@@ -520,7 +605,7 @@ def load_site_scenes(site_name, mndwi, years, satellite_path):
             ).astype(numpy.float32)
 
             scenes.append(
-                (mndwi_by_time.get(time_key(scene_time), numpy.nan), scene_time, rgb)
+                (sort_value_by_time.get(time_key(scene_time), numpy.nan), scene_time, rgb)
             )
 
     scenes.sort(
@@ -532,9 +617,9 @@ def load_site_scenes(site_name, mndwi, years, satellite_path):
     return scenes
 
 
-def make_rgb_cards(site_name, scenes):
+def make_rgb_cards(site_name, scenes, sort_value_label):
     cards = []
-    for mndwi_value, scene_time, rgb in scenes:
+    for sort_value, scene_time, rgb in scenes:
         valid = numpy.isfinite(rgb).all(axis=-1) & (rgb >= 0).all(axis=-1) & (rgb > 0).any(axis=-1)
         display_rgb = numpy.ones_like(rgb)
 
@@ -564,21 +649,24 @@ def make_rgb_cards(site_name, scenes):
 
         image = base64.b64encode(image_buffer.getvalue()).decode("ascii")
         date_label = html.escape(scene_time.strftime("%Y-%m-%d %H:%M"))
-        value_label = f"{mndwi_value:.3f}" if pandas.notna(mndwi_value) else "unavailable"
+        value_label = f"{sort_value:.3f}" if pandas.notna(sort_value) else "unavailable"
         cards.append(
             f'<article class="scene"><h2>{date_label}</h2>'
             f'<img src="data:image/jpeg;base64,{image}" alt="{site_name} RGB {date_label}">'
-            f'<div class="caption">Mean MNDWI: {value_label}</div></article>'
+            f'<div class="caption">{sort_value_label}: {value_label}</div></article>'
         )
 
     return cards
 
-def create_rgb_gallery(site_name, mndwi, gallery_file, years, max_cloud_cover, satellite_path):
+def create_rgb_gallery(site_name, sort_value, gallery_file, max_cloud_cover, satellite_path, sort_value_label, years: list = None):
     print(f"\tSite {site_name} - create gallery")
 
-    scenes = load_site_scenes(site_name, mndwi, years, satellite_path)
-    cards = make_rgb_cards(site_name, scenes)
+    scenes = load_site_scenes(site_name=site_name, sort_values=sort_value, satellite_path=satellite_path, years=years, sort_column=sort_value_label)
+    cards = make_rgb_cards(site_name, scenes, sort_value_label)
+
+    if years is None:
+        date_range_label = "No years specified"
+    else:
+        date_range_label = f"{min(years)}-{max(years)}"
     
-    date_range_label = f"{min(years)}-{max(years)}"
-    
-    make_gallery(site_name, "RGB scenes by mean MNDWI", cards, gallery_file, satellite_path, date_range_label=date_range_label, max_cloud_cover_pct=max_cloud_cover)
+    make_gallery(site_name, f"RGB scenes by {sort_value_label}", cards, gallery_file, satellite_path, date_range_label=date_range_label, max_cloud_cover_pct=max_cloud_cover)

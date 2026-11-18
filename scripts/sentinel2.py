@@ -1,6 +1,8 @@
 """Module focused on downloading and processing Sentinel-2 data."""
 
 import pathlib
+import hashlib
+import io
 import zoneinfo
 import utils
 import datetime
@@ -178,8 +180,8 @@ def _get_tide_api_filtered_images_near_date(
     data = harmonize_post_2022(data)
 
     print(
-        f"\tTide API-filtered tiles: {len(data['time'])} from "
-        f"{all_tide_n} STAC items"
+        f"\tTide API-filtered tiles grouped by solar day: {len(data['time'])} from "
+        f"{items} ungrouped STAC items"
     )
 
     return data
@@ -461,8 +463,8 @@ def _get_tide_api_filtered_images_in_year(
     data = harmonize_post_2022(data)
     
     print(
-        f"\tTide API-filtered tiles: {len(data['time'])} from "
-        f"{all_tide_n} STAC items"
+        f"\tTide API-filtered tiles grouped by solar day: {len(data['time'])} from "
+        f"{items} ungrouped STAC items"
     )
 
     return data
@@ -955,6 +957,80 @@ def compute_and_save_band_quality_baseline(
     return baseline
 
 
+def compute_and_save_council_band_quality_baseline(
+    council_sites: list,
+    satellite_images_paths,
+    training_baseline_file: pathlib.Path = None,
+    bands: list = None,
+    mad_shrinkage_k: float = 20.0,
+):
+    """Save council baselines using the training sites' weighted raw MAD as reference.
+
+    Existing council site/band rows are replaced only when newly computed. The
+    training baseline is never changed, and its SHA-256 is recorded in each row.
+    """
+    if mad_shrinkage_k < 0:
+        raise ValueError("mad_shrinkage_k must be non-negative")
+
+    if training_baseline_file is None:
+        training_baseline_file = utils.get_band_quality_baseline_path()
+    training_baseline_file = pathlib.Path(training_baseline_file)
+    council_baseline_file = utils.get_data_path() / "council_band_quality_baseline.csv"
+    if training_baseline_file.resolve() == council_baseline_file.resolve():
+        raise ValueError("Training and council baseline files must be different")
+
+    training_bytes = training_baseline_file.read_bytes()
+    training_baseline = pandas.read_csv(io.BytesIO(training_bytes))
+    required_columns = {"site", "band", "mad_raw", "n_images"}
+    if not required_columns.issubset(training_baseline.columns):
+        raise ValueError(f"Training baseline must contain columns {sorted(required_columns)}")
+    if training_baseline.empty or training_baseline.duplicated(["site", "band"]).any():
+        raise ValueError("Training baseline must have unique, non-empty site/band rows")
+    if training_baseline[["site", "band"]].isna().any().any():
+        raise ValueError("Training baseline site and band values must not be missing")
+    for column in ("mad_raw", "n_images"):
+        training_baseline[column] = pandas.to_numeric(training_baseline[column], errors="coerce")
+    if (
+        not numpy.isfinite(training_baseline[["mad_raw", "n_images"]].to_numpy()).all()
+        or (training_baseline["mad_raw"] < 0).any()
+        or (training_baseline["n_images"] <= 0).any()
+    ):
+        raise ValueError("Training baseline must have finite non-negative MADs and positive image counts")
+
+    baseline = compute_band_quality_baseline(
+        training_sites=council_sites,
+        satellite_images_paths=satellite_images_paths,
+        bands=bands,
+        mad_shrinkage_k=0,
+    )
+    if baseline.empty:
+        raise ValueError("No council band quality baselines were computed")
+    if not numpy.isfinite(baseline[["median", "mad_raw", "n_images"]].to_numpy()).all():
+        raise ValueError("Council baselines must have finite medians, MADs and image counts")
+
+    missing_bands = set(baseline["band"]) - set(training_baseline["band"])
+    if missing_bands:
+        raise ValueError(f"Training baseline is missing bands: {sorted(missing_bands)}")
+    reference_mad = training_baseline.groupby("band").apply(
+        lambda group: numpy.average(group["mad_raw"], weights=group["n_images"])
+    )
+    shrinkage_weight = baseline["n_images"] / (baseline["n_images"] + mad_shrinkage_k)
+    baseline["mad"] = (
+        shrinkage_weight * baseline["mad_raw"]
+        + (1 - shrinkage_weight) * baseline["band"].map(reference_mad)
+    )
+    baseline["reference_sha256"] = hashlib.sha256(training_bytes).hexdigest()
+
+    if council_baseline_file.exists():
+        existing = pandas.read_csv(council_baseline_file)
+        new_keys = pandas.MultiIndex.from_frame(baseline[["site", "band"]])
+        existing_keys = pandas.MultiIndex.from_frame(existing[["site", "band"]])
+        baseline = pandas.concat([existing.loc[~existing_keys.isin(new_keys)], baseline], ignore_index=True)
+    baseline.to_csv(council_baseline_file, index=False)
+    print(f"\tSaved council band quality baseline to {council_baseline_file}")
+    return baseline
+
+
 def load_band_quality_baseline() -> pandas.DataFrame:
     """Load the cached per-site, per-band quality baseline written by
     compute_and_save_band_quality_baseline."""
@@ -1102,6 +1178,30 @@ def _check_low_tide_from_tide_api(
         hours=low_tide_delta_hrs, minutes=low_tide_delta_mins)
 
 
+def filter_low_tide_dates_from_tide_api(
+    data,
+    lat: float,
+    lon: float,
+    low_tide_delta_hrs: int,
+    low_tide_delta_mins: int,
+):
+    """Keep acquisition times within the low-tide window, inclusive.
+
+    Dataset times are interpreted as UTC; lat/lon must be in NZGD1949.
+    """
+    low_tide_delta = pandas.Timedelta(
+        hours=low_tide_delta_hrs, minutes=low_tide_delta_mins
+    )
+    timestamps = data["time"].dt.strftime("%Y-%m-%dT%H:%M:%S.%f").values
+    kept = []
+    for timestamp in timestamps:
+        tide_info = _get_low_tide_info_for_datetime(timestamp, lat, lon)
+        kept.append(tide_info["time_from_low_tide"] <= low_tide_delta)
+
+    print(f"\tTide API filter: {sum(kept)} of {len(timestamps)} dates kept")
+    return data.isel(time=numpy.asarray(kept, dtype=bool))
+
+
 def get_low_tide_info_from_tide_api(item, lat, lon):
     """Returns the low tide information for the given satellite image and
       location - low tide height, time and time between the low tide and
@@ -1110,14 +1210,20 @@ def get_low_tide_info_from_tide_api(item, lat, lon):
       lon: Longitude of the location in NZGD49
       """
 
+    satellite_datetime_utc = datetime.datetime.strptime(
+        item.properties["datetime"],
+        SATELLITE_DATE_FORMAT).replace(tzinfo=datetime.timezone.utc)
+    return _get_low_tide_info_for_datetime(satellite_datetime_utc, lat, lon)
+
+
+def _get_low_tide_info_for_datetime(satellite_datetime, lat, lon):
+    """Query nearest low tide for an acquisition time, interpreting naive times as UTC."""
     dotenv.load_dotenv()
     tide_api_key = os.environ.get("TIDE_API", None)
     if tide_api_key is None:
         raise ValueError("TIDE_API environment variable not set in .env file")
 
-    satellite_datetime_utc = datetime.datetime.strptime(
-        item.properties["datetime"],
-        SATELLITE_DATE_FORMAT).replace(tzinfo=datetime.timezone.utc)
+    satellite_datetime_utc = pandas.to_datetime(satellite_datetime, utc=True)
     satellite_datetime_nz_dt = satellite_datetime_utc.astimezone(
         zoneinfo.ZoneInfo('Pacific/Auckland'))
     
