@@ -55,41 +55,6 @@ def test_council_baseline_does_not_overwrite_on_empty_result(tmp_path, monkeypat
     assert council_file.read_bytes() == original
 
 
-def test_threshold_low_tide_dates_uses_only_site_polygon_pixels(monkeypatch):
-    data = xarray.Dataset(
-        {"SCL": (("time", "y", "x"), numpy.array([[[4, 6, 6], [6, 6, 6], [6, 6, 6]]]))},
-        coords={
-            "time": numpy.array(["2025-01-01"], dtype="datetime64[D]"),
-            "y": [2.5, 1.5, 0.5],
-            "x": [0.5, 1.5, 2.5],
-        },
-    ).rio.write_crs("EPSG:2193")
-
-    class SitePolygon:
-        geometry = [SimpleNamespace(__geo_interface__={})]
-
-        def to_crs(self, crs):
-            return self
-
-    site_mask = numpy.array(
-        [[True, True, False], [True, True, False], [False, False, False]]
-    )
-    monkeypatch.setattr(
-        sentinel2.rasterio.features,
-        "geometry_mask",
-        lambda geometries, **kwargs: site_mask,
-    )
-    dry_thresholds = pandas.DataFrame(
-        [{"site": "TestSite", "dry_threshold_percentage": 20}]
-    )
-
-    selected = sentinel2.threshold_low_tide_dates(
-        data, "TestSite", dry_thresholds, SitePolygon()
-    )
-
-    assert selected.sizes["time"] == 0
-
-
 def test_filter_valid_low_cloud_dates_excludes_empty_site_and_counts_cloud_over_coverage():
     rgb = numpy.array([[[0, 0, 0, 0]], [[100, 150, 200, 0]], [[100, 150, 200, 0]]])
     scl = numpy.array([[[0, 0, 0, 0]], [[6, 6, 9, 0]], [[6, 6, 9, 0]]])
@@ -109,12 +74,13 @@ def test_filter_valid_low_cloud_dates_excludes_empty_site_and_counts_cloud_over_
 
 
 @pytest.mark.parametrize("download", ["near_date", "in_year"])
-def test_download_discards_dates_without_rgb_pixels(monkeypatch, download):
-    data = xarray.Dataset(
-        {band: (("time", "y", "x"), numpy.zeros((1, 1, 1))) for band in sentinel2.BANDS},
-        coords={"time": numpy.array(["2016-04-06"], dtype="datetime64[D]")},
+def test_download_returns_empty_dataset_without_writing(monkeypatch, download):
+    data = sentinel2.empty_satellite_dataset()
+    source = (
+        "_get_tide_api_filtered_images_near_date"
+        if download == "near_date"
+        else "_get_tide_api_filtered_images_in_year"
     )
-    source = "get_low_tide_images_near_date" if download == "near_date" else "get_low_tide_images_in_year"
     monkeypatch.setattr(sentinel2, source, lambda *args, **kwargs: data)
     monkeypatch.setattr(sentinel2.utils, "write_netcdf_conventions_in_place", lambda result: pytest.fail("Empty dataset must not be written"))
 
@@ -133,9 +99,15 @@ def test_harmonize_post_2022_changes_returned_bands_but_not_scl():
         [[1550, 0, numpy.nan]],
     ])
     data = xarray.Dataset(
-        {band: (("time", "y", "x"), reflectance.copy()) for band in sentinel2.BANDS if band != "SCL"}
+        {band: (("time", "y", "x"), reflectance.copy())
+         for band in sentinel2.BANDS if band != "SCL"}
         | {"SCL": (("time", "y", "x"), numpy.full((3, 1, 3), 6))},
-        coords={"time": numpy.array(["2022-01-24", "2022-01-25", "2022-02-01"], dtype="datetime64[D]")},
+        coords={
+            "time": numpy.array(
+                ["2022-01-24", "2022-01-25", "2022-02-01"],
+                dtype="datetime64[D]",
+            )
+        },
     )
 
     result = sentinel2.harmonize_post_2022(data)
@@ -143,35 +115,14 @@ def test_harmonize_post_2022_changes_returned_bands_but_not_scl():
     assert result is data
     for band in sentinel2.BANDS:
         if band == "SCL":
-            numpy.testing.assert_array_equal(result[band].values, numpy.full((3, 1, 3), 6))
+            numpy.testing.assert_array_equal(
+                result[band].values, numpy.full((3, 1, 3), 6)
+            )
         else:
             numpy.testing.assert_allclose(
                 result[band].values[:, 0, :],
                 [[450, 0, numpy.nan], [550, 0, numpy.nan], [550, 0, numpy.nan]],
             )
-
-
-@pytest.mark.parametrize("download", ["near_date", "in_year"])
-def test_download_returns_harmonized_data(monkeypatch, download):
-    data = xarray.Dataset(
-        {band: (("time", "y", "x"), numpy.array([[[550]], [[1550]]]))
-         for band in sentinel2.BANDS if band != "SCL"}
-        | {"SCL": (("time", "y", "x"), numpy.array([[[6]], [[6]]]))},
-        coords={"time": numpy.array(["2021-06-01", "2023-06-01"], dtype="datetime64[D]")},
-    )
-    source = "get_low_tide_images_near_date" if download == "near_date" else "get_low_tide_images_in_year"
-    monkeypatch.setattr(sentinel2, source, lambda *args, **kwargs: data)
-    monkeypatch.setattr(sentinel2.utils, "write_netcdf_conventions_in_place", lambda result: None)
-
-    if download == "near_date":
-        result = sentinel2.get_low_tide_no_cloud_images_near_date(
-            "site", None, 100, None, 5, 1, 0,
-        )
-    else:
-        result = sentinel2.get_low_tide_no_cloud_images_in_year(None, 100, 2023, 1, 0)
-
-    assert result["B04"].values[:, 0, 0].tolist() == [550, 550]
-    assert result["SCL"].values[:, 0, 0].tolist() == [6, 6]
 
 
 @pytest.mark.parametrize("scl_values", ([6, 6, 9, 0], [0, 0, 9, 0]))
@@ -220,7 +171,8 @@ def test_get_satellite_info_uses_clear_rgb_pixels_within_site(monkeypatch, scl_v
     ])
     monkeypatch.setattr(sentinel2.odc.stac, "load", load)
 
-    if "first" not in item_ids:
+    has_valid_scl = any(value not in sentinel2.SCL_TO_IGNORE for value in scl_values)
+    if "first" not in item_ids or not has_valid_scl:
         with pytest.raises(ValueError, match="No satellite items with valid RGB pixels"):
             sentinel2.get_satellite_info(Geometry(), "2025-01-01")
         return

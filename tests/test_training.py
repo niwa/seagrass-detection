@@ -196,9 +196,13 @@ def test_load_unet_classifier_selects_architecture(
     })
     expected = object()
     classifier = getattr(training, expected_class)
-    monkeypatch.setattr(classifier, "load_from_checkpoint", lambda path: expected)
+    monkeypatch.setattr(
+        classifier, "load_from_checkpoint", lambda path, **kwargs: expected
+    )
 
-    assert training.load_unet_classifier(tmp_path / "model.ckpt") is expected
+    assert training.load_unet_classifier(
+        tmp_path / "model.ckpt", weights_only=True
+    ) is expected
 
 
 @pytest.fixture

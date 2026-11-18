@@ -89,9 +89,16 @@ def test_confusion_matrix_saves_metrics_with_matching_class_order(tmp_path, monk
 @pytest.mark.parametrize(
     ("options", "expected_models"),
     [
-        ({}, {"RF", "UNet tile=128 stride=64", "UNet tile=64 stride=None"}),
+        ({}, {
+            "RF",
+            "UNet tile=128 stride=64, epochs=100",
+            "UNet tile=64 stride=32, epochs=25",
+        }),
         ({"include_unet": False}, {"RF"}),
-        ({"include_rf": False}, {"UNet tile=128 stride=64", "UNet tile=64 stride=None"}),
+        ({"include_rf": False}, {
+            "UNet tile=128 stride=64, epochs=100",
+            "UNet tile=64 stride=32, epochs=25",
+        }),
     ],
 )
 def test_site_area_timeseries_selects_models(tmp_path, monkeypatch, options, expected_models):
@@ -100,11 +107,9 @@ def test_site_area_timeseries_selects_models(tmp_path, monkeypatch, options, exp
         "RF_model_ihutai_trained_13_class_10_percent_test_train_sampling_2_80_percent_"
         "tide_30mins_cloud_1_predict_tide_30mins_cloud_0",
         "UN_model_all_trained_13_class_10_percent_test_100_epochs_128_tiling_64_stride_"
-        "diffuser_unet_all_bands_all_SCL_train_sampling_2_80_percent_"
-        "tide_30mins_cloud_1_predict_tide_30mins_cloud_0",
+        "train_sampling_2_80_percent_tide_30mins_cloud_1_predict_tide_30mins_cloud_0",
         "UN_model_all_trained_13_class_10_percent_test_25_epochs_64_tiling_32_stride_"
-        "diffuser_unet_all_bands_all_SCL_train_sampling_2_80_percent_"
-        "tide_1hrs_30mins_cloud_1_predict_tide_30mins_cloud_0",
+        "train_sampling_2_80_percent_tide_1hrs_30mins_cloud_1_predict_tide_30mins_cloud_0",
         "UNet_model_256_64_10_percent_test_train_sampling_2_80_percent_"
         "tide_30mins_cloud_1_predict_tide_30mins_cloud_0",
     )
@@ -127,7 +132,7 @@ def test_site_area_timeseries_selects_models(tmp_path, monkeypatch, options, exp
     )
 
     assert len(output_paths) == 2
-    site_figure = figures["Example_target_area_timeseries.html"]
+    site_figure = figures[output_paths[0].name]
     assert site_figure.layout.width == 2800
     assert {trace.name.split(", sampling=")[0] for trace in site_figure.data} == expected_models
     if options == {}:

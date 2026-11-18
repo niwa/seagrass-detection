@@ -60,11 +60,10 @@ class TestGetDataPaths:
 
         assert satellite_path.parent.parent.name == "tide_thresholded_cloud_5"
 
-    def test_thresholded_name_rejects_tide_deltas(self):
-        with pytest.raises(ValueError, match="Tide deltas must be None"):
-            utils.get_low_tide_max_cloud_name(
-                5, low_tide_delta_hrs=1, use_threshold=True,
-            )
+    def test_thresholded_name_includes_tide_delta(self):
+        assert utils.get_low_tide_max_cloud_name(
+            5, low_tide_delta_hrs=1, low_tide_delta_mins=0, use_threshold=True,
+        ) == "tide_thresholded_and_1hrs_cloud_5"
 
     def test_get_samples_path_creates_directory(self, tmp_path, monkeypatch):
         monkeypatch.setattr(utils, "get_data_path", lambda: tmp_path)
